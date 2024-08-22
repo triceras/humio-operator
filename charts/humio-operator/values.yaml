@@ -40,3 +40,8 @@ operator:
             - linux
 
 certmanager: true
+
+sidecarContainer:
+  name: busybox-sidecar
+  image: busybox
+

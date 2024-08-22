@@ -452,9 +452,10 @@ func ConstructPod(hnp *HumioNodePool, humioNodeName string, attachments *podAtta
 		for _, existingContainer := range pod.Spec.Containers {
 			if sidecar.Name == existingContainer.Name {
 				return &corev1.Pod{}, fmt.Errorf("sidecarContainer conflicts with existing name: %s", sidecar.Name)
-
 			}
 		}
+		// Set the sidecar container's image
+		sidecar.Image = hnp.GetSidecarImage()
 		pod.Spec.Containers = append(pod.Spec.Containers, sidecar)
 	}
 
