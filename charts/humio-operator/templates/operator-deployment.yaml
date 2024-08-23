@@ -75,9 +75,6 @@ spec:
       - name: {{ .Values.sidecarContainer.name }}
         image: {{ .Values.sidecarContainer.image }}
         imagePullPolicy: IfNotPresent
-        command:
-        - sleep
-        - "3600"
         resources:
           limits:
             cpu: 10m

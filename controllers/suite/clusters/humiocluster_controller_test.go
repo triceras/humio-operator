@@ -4997,7 +4997,7 @@ var _ = Describe("HumioCluster Controller", func() {
 			toCreate.Spec.SidecarContainers = []corev1.Container{
 				{
 					Name:  "jmap",
-					Image: "test-sidecar-image",
+					Image: controllers.SidecarImage,
 				},
 			}
 
@@ -5007,7 +5007,6 @@ var _ = Describe("HumioCluster Controller", func() {
 			defer suite.CleanupCluster(ctx, k8sClient, toCreate)
 
 			suite.UsingClusterBy(key.Name, "Confirming the sidecar image is set correctly")
-			// Use the function GetSideCarImage() to get the sidecar image
 			clusterPods, _ := kubernetes.ListPods(ctx, k8sClient, key.Namespace, controllers.NewHumioNodeManagerFromHumioCluster(toCreate).GetPodLabels())
 			for _, pod := range clusterPods {
 				for _, container := range pod.Spec.Containers {
