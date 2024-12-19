@@ -101,6 +101,9 @@ type HumioClusterSpec struct {
 
 	// NodePools can be used to define additional groups of Humio cluster pods that share a set of configuration.
 	NodePools []HumioNodePoolSpec `json:"nodePools,omitempty"`
+
+	// PodDisruptionBudget defines the configuration for the PodDisruptionBudget
+	PodDisruptionBudget *PodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
 }
 
 type HumioNodeSpec struct {
@@ -468,4 +471,15 @@ func (l HumioPodStatusList) Swap(i, j int) {
 
 func init() {
 	SchemeBuilder.Register(&HumioCluster{}, &HumioClusterList{})
+}
+
+// PodDisruptionBudgetSpec defines the configuration for the PodDisruptionBudget
+type PodDisruptionBudgetSpec struct {
+	// MinAvailable specifies the minimum number of pods that must be available
+	// +optional
+	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+
+	// MaxUnavailable specifies the maximum number of pods that can be unavailable
+	// +optional
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
