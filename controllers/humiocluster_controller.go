@@ -82,9 +82,6 @@ const (
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=create;delete;get;list;patch;update;watch
 //+kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=create;delete;get;list;patch;update;watch
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingress,verbs=create;delete;get;list;patch;update;watch
-//+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 
 func (r *HumioClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	// when running tests, ignore resources that are not in the correct namespace
@@ -2394,7 +2391,7 @@ func (r *HumioClusterReconciler) reconcilePodDisruptionBudget(ctx context.Contex
 		}
 	} else {
 		// Set default values if not specified in the CR
-		defaultMinAvailable := intstr.FromInt(2) // Example default: at least 2 pods available
+		defaultMinAvailable := intstr.FromInt32(2) // Example default: at least 2 pods available
 		pdb.Spec.MinAvailable = &defaultMinAvailable
 	}
 
