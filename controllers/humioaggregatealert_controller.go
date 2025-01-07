@@ -179,7 +179,7 @@ func (r *HumioAggregateAlertReconciler) reconcileHumioAggregateAlert(ctx context
 
 	if asExpected, diffKeysAndValues := aggregateAlertAlreadyAsExpected(haa, curAggregateAlert); !asExpected {
 		r.Log.Info("information differs, triggering update",
-			helpers.MapToAnySlice(diffKeysAndValues)...,
+			"diff", diffKeysAndValues,
 		)
 		updateErr := r.HumioClient.UpdateAggregateAlert(ctx, client, req, haa)
 		if updateErr != nil {
@@ -234,7 +234,7 @@ func aggregateAlertAlreadyAsExpected(fromKubernetesCustomResource *humiov1alpha1
 	if diff := cmp.Diff(fromGraphQL.GetThrottleField(), fromKubernetesCustomResource.Spec.ThrottleField); diff != "" {
 		keyValues["throttleField"] = diff
 	}
-	if diff := cmp.Diff(fromGraphQL.GetThrottleTimeSeconds(), fromKubernetesCustomResource.Spec.ThrottleTimeSeconds); diff != "" {
+	if diff := cmp.Diff(fromGraphQL.GetThrottleTimeSeconds(), int64(fromKubernetesCustomResource.Spec.ThrottleTimeSeconds)); diff != "" {
 		keyValues["throttleTimeSeconds"] = diff
 	}
 	actionsFromGraphQL := humioapi.GetActionNames(fromGraphQL.GetActions())
