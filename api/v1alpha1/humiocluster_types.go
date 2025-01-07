@@ -307,6 +307,8 @@ type HumioNodePoolSpec struct {
 	//+required
 	Name string `json:"name"`
 
+	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+
 	HumioNodeSpec `json:"spec,omitempty"`
 }
 

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/strings/slices"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/go-logr/logr"
@@ -2367,73 +2369,174 @@ func (r *HumioClusterReconciler) podLabelsForHumio(name string) map[string]strin
 	return map[string]string{"app": "humio", "humio_cr": name}
 }
 
-func (r *HumioClusterReconciler) reconcilePodDisruptionBudget(ctx context.Context, humioCluster *humiov1alpha1.HumioCluster) error {
-	// Define the desired PodDisruptionBudget object
-	pdb := &policyv1.PodDisruptionBudget{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      humioCluster.Name + "-pdb", // Or a more suitable name
-			Namespace: humioCluster.Namespace,
-			Labels:    r.podLabelsForHumio(humioCluster.Name), // Make sure labels are correct
-		},
-		Spec: policyv1.PodDisruptionBudgetSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: r.podLabelsForHumio(humioCluster.Name),
-			},
-		},
-	}
 
-	// Set the MinAvailable or MaxUnavailable value
-	if humioCluster.Spec.PodDisruptionBudget != nil {
-		if humioCluster.Spec.PodDisruptionBudget.MinAvailable != nil {
-			pdb.Spec.MinAvailable = humioCluster.Spec.PodDisruptionBudget.MinAvailable
-		} else if humioCluster.Spec.PodDisruptionBudget.MaxUnavailable != nil {
-			pdb.Spec.MaxUnavailable = humioCluster.Spec.PodDisruptionBudget.MaxUnavailable
-		}
-	} else {
-		// Set default values if not specified in the CR
-		defaultMinAvailable := intstr.FromInt32(2) // Example default: at least 2 pods available
-		pdb.Spec.MinAvailable = &defaultMinAvailable
-	}
+// PDB implementation
+// ensurePDBs ensures that PodDisruptionBudgets are created for each node pool in the HumioCluster
+func (r *HumioClusterReconciler) reconcilePodDisruptionBudget(ctx context.Context, hc *humiov1alpha1.HumioCluster) error {
+	logger := log.FromContext(ctx)
 
-	// Check if the PodDisruptionBudget already exists
-	foundPdb := &policyv1.PodDisruptionBudget{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: pdb.Name, Namespace: pdb.Namespace}, foundPdb)
-	if err != nil && k8serrors.IsNotFound(err) {
-		// Create the PodDisruptionBudget
-		r.Log.Info("Creating a new PodDisruptionBudget", "PDB.Namespace", pdb.Namespace, "PDB.Name", pdb.Name)
-		err = r.Client.Create(ctx, pdb)
-		if err != nil {
+	// Iterate over each node pool and ensure a PDB exists
+	for _, nodePool := range hc.Spec.NodePools {
+		pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, nodePool.Name)
+		pdb := &policyv1.PodDisruptionBudget{}
+		err := r.Client.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: hc.Namespace}, pdb)
+
+		if err != nil && k8serrors.IsNotFound(err) {
+			// PDB doesn't exist, create it
+			pdb := r.podDisruptionBudget(hc, nodePool)
+			logger.Info("Creating a new PDB", "PDB.Namespace", pdb.Namespace, "PDB.Name", pdb.Name)
+			if err := r.Client.Create(ctx, pdb); err != nil {
+				logger.Error(err, "Failed to create new PDB", "PDB.Namespace", pdb.Namespace, "PDB.Name", pdb.Name)
+				return err
+			}
+			return nil
+		} else if err != nil {
+			// Error getting the PDB
+			logger.Error(err, "Failed to get PDB", "PDB.Namespace", hc.Namespace, "PDB.Name", pdbName)
 			return err
 		}
-		return nil
-	} else if err != nil {
-		return err
-	}
 
-	// Update the PodDisruptionBudget if it exists and needs updating
-	if humioCluster.Spec.PodDisruptionBudget != nil {
-		if needsPDBUpdate(foundPdb, pdb) {
-			foundPdb.Spec = pdb.Spec
-			r.Log.Info("Updating PodDisruptionBudget", "PDB.Namespace", foundPdb.Namespace, "PDB.Name", foundPdb.Name)
-			err = r.Client.Update(ctx, foundPdb)
-			if err != nil {
+		// PDB exists, check if it needs to be updated
+		desiredPDB := r.podDisruptionBudget(hc, nodePool)
+		if !r.arePDBsEqual(*pdb, *desiredPDB) {
+			logger.Info("Updating PDB", "PDB.Namespace", pdb.Namespace, "PDB.Name", pdb.Name)
+			pdb.Spec = desiredPDB.Spec
+			if err := r.Client.Update(ctx, pdb); err != nil {
+				logger.Error(err, "Failed to update PDB", "PDB.Namespace", pdb.Namespace, "PDB.Name", pdb.Name)
 				return err
 			}
 		}
 	}
+
+	// Clean up any PDBs that are no longer associated with a node pool
+	pdbList := &policyv1.PodDisruptionBudgetList{}
+	labels := r.podLabelsForHumio(hc.Name) // Get all PDBs for this HumioCluster
+	listOptions := []client.ListOption{
+		client.MatchingLabels(labels),
+	}
+	if err := r.Client.List(ctx, pdbList, listOptions...); err != nil {
+		logger.Error(err, "Failed to list PDBs")
+		return err
+	}
+
+	for _, pdb := range pdbList.Items {
+		// Check if the PDB belongs to a current node pool
+		if !r.isPDBBelongingToNodePool(hc, pdb) {
+			logger.Info("Deleting orphaned PDB", "PDB.Namespace", pdb.Namespace, "PDB.Name", pdb.Name)
+			if err := r.Client.Delete(ctx, &pdb); err != nil {
+				logger.Error(err, "Failed to delete orphaned PDB", "PDB.Namespace", pdb.Namespace, "PDB.Name", pdb.Name)
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
-func needsPDBUpdate(current, desired *policyv1.PodDisruptionBudget) bool {
-	if current.Spec.MinAvailable != nil && desired.Spec.MinAvailable != nil {
-		if current.Spec.MinAvailable.String() != desired.Spec.MinAvailable.String() {
-			return true
-		}
+// podDisruptionBudget returns a new PodDisruptionBudget, with a name unique to the given node pool
+func (r *HumioClusterReconciler) podDisruptionBudget(hc *humiov1alpha1.HumioCluster, nodePool humiov1alpha1.HumioNodePoolSpec) *policyv1.PodDisruptionBudget {
+	// Ensure the PDB name does not exceed the maximum length of 253 characters
+	pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, nodePool.Name)
+	if len(pdbName) > 253 {
+		pdbName = pdbName[:253]
 	}
-	if current.Spec.MaxUnavailable != nil && desired.Spec.MaxUnavailable != nil {
-		if current.Spec.MaxUnavailable.String() != desired.Spec.MaxUnavailable.String() {
+	labels := r.podLabelsForHumio(hc.Name)
+	labels["humio_pool_name"] = nodePool.Name
+
+	var minAvailable *intstr.IntOrString
+	if nodePool.MinAvailable != nil {
+		minAvailable = nodePool.MinAvailable
+	} else {
+		defaultMinAvailable := intstr.FromInt(1)
+		minAvailable = &defaultMinAvailable
+	}
+	maxUnavailable := maxUnavailableFromMinAvailable(minAvailable, nodePool.NodeCount)
+
+	objectMeta := metav1.ObjectMeta{
+		Name:      pdbName,
+		Namespace: hc.Namespace,
+		Labels:    labels,
+	}
+	// Use standard controllerutil.SetControllerReference instead of SetControllerReferenceWithOverride
+	if err := controllerutil.SetControllerReference(hc, &objectMeta, r.Scheme()); err != nil {
+		r.Log.Error(err, "unable to set controller reference on pdb object")
+	}
+
+	// Validate MinAvailable is either a percentage string or integer <= node count
+	if minAvailable.Type == intstr.String {
+		if !strings.HasSuffix(minAvailable.StrVal, "%") {
+			r.Log.Error(fmt.Errorf("invalid minAvailable value"), "minAvailable must be a percentage string ending with %%")
+			return nil
+		}
+		percent, err := strconv.Atoi(strings.TrimSuffix(minAvailable.StrVal, "%"))
+		if err != nil || percent < 0 || percent > 100 {
+			r.Log.Error(fmt.Errorf("invalid minAvailable percentage"), "minAvailable percentage must be between 0%% and 100%%")
+			return nil
+		}
+	} else if minAvailable.IntVal > int32(nodePool.NodeCount) {
+		r.Log.Error(fmt.Errorf("invalid minAvailable value"), 
+			"minAvailable value %d cannot be greater than node count %d", 
+			minAvailable.IntVal, nodePool.NodeCount)
+		return nil
+	}
+
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: objectMeta,
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MinAvailable:   minAvailable,
+			MaxUnavailable: maxUnavailable,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+		},
+	}
+}
+
+// isPDBBelongingToNodePool checks if the given PDB is associated with any of the HumioCluster's node pools
+func (r *HumioClusterReconciler) isPDBBelongingToNodePool(hc *humiov1alpha1.HumioCluster, pdb policyv1.PodDisruptionBudget) bool {
+	for _, nodePool := range hc.Spec.NodePools {
+		if pdb.Name == fmt.Sprintf("%s-%s-pdb", hc.Name, nodePool.Name) {
 			return true
 		}
 	}
 	return false
+}
+
+// arePDBsEqual compares two PDB objects to see if they are equal (excluding metadata and status)
+func (r *HumioClusterReconciler) arePDBsEqual(pdb1, pdb2 policyv1.PodDisruptionBudget) bool {
+	return pdb1.Spec.MinAvailable.String() == pdb2.Spec.MinAvailable.String() &&
+		r.labelMapsEqual(pdb1.Spec.Selector.MatchLabels, pdb2.Spec.Selector.MatchLabels)
+}
+
+// maxUnavailableFromMinAvailable calculates the maxUnavailable value from the given minAvailable and replicas
+func maxUnavailableFromMinAvailable(minAvailable *intstr.IntOrString, replicas int) *intstr.IntOrString {
+	if minAvailable.Type == intstr.Int {
+		maxUnavailableValue := replicas - int(minAvailable.IntVal)
+		if maxUnavailableValue < 0 {
+			maxUnavailableValue = 0
+		}
+		return &intstr.IntOrString{Type: intstr.Int, IntVal: int32(maxUnavailableValue)}
+	}
+	if minAvailable.Type == intstr.String {
+		maxUnavailableValue := 100 - int(minAvailable.IntVal)
+		if maxUnavailableValue < 0 {
+			maxUnavailableValue = 0
+		}
+		return &intstr.IntOrString{Type: intstr.String, StrVal: fmt.Sprintf("%d%%", maxUnavailableValue)}
+	}
+	return nil
+}
+
+// labelMapsEqual compares two label maps and returns true if they are equal
+func (r *HumioClusterReconciler) labelMapsEqual(mapA, mapB map[string]string) bool {
+	if len(mapA) != len(mapB) {
+		return false
+	}
+	for k, vA := range mapA {
+		vB, ok := mapB[k]
+		if !ok || vA != vB {
+			return false
+		}
+	}
+	return true
 }
