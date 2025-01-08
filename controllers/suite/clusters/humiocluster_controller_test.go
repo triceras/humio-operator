@@ -6050,25 +6050,22 @@ var _ = Describe("HumioCluster Controller", func() {
 		)
 
 		BeforeEach(func() {
-			// Remove any existing license secret to avoid AlreadyExists error.
+			ctx = context.Background()
+			key = types.NamespacedName{
+				Name:      "pdb-test",
+				Namespace: testProcessNamespace,
+			}
+
 			existingSecret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      fmt.Sprintf("%s-license", key.Name),
 					Namespace: key.Namespace,
 				},
-				StringData: map[string]string{},
-				Type:       corev1.SecretTypeOpaque,
 			}
-
-			// Deletion here is idempotent; if the secret doesn't exist, it won't fail the test.
 			_ = k8sClient.Delete(ctx, existingSecret)
 		})
 
 		It("should not create PDB for single-node pool", func() {
-			key := types.NamespacedName{
-				Name:      "hc-pdb-single-node-pool",
-				Namespace: testProcessNamespace,
-			}
 			hc := suite.ConstructBasicSingleNodeHumioCluster(key, true)
 			hc.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{
 				{
@@ -6093,10 +6090,6 @@ var _ = Describe("HumioCluster Controller", func() {
 		})
 
 		It("should create PDB with user-specified minAvailable", func() {
-			key := types.NamespacedName{
-				Name:      "hc-pdb-minavail",
-				Namespace: testProcessNamespace,
-			}
 			minAvail := intstr.FromInt(2)
 			hc := suite.ConstructBasicSingleNodeHumioCluster(key, true)
 			hc.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{
@@ -6124,10 +6117,6 @@ var _ = Describe("HumioCluster Controller", func() {
 		})
 
 		It("should create PDB with user-specified maxUnavailable", func() {
-			key := types.NamespacedName{
-				Name:      "hc-pdb-maxunavail",
-				Namespace: testProcessNamespace,
-			}
 			maxUnavail := intstr.FromInt(1)
 			hc := suite.ConstructBasicSingleNodeHumioCluster(key, true)
 			hc.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{
@@ -6155,10 +6144,6 @@ var _ = Describe("HumioCluster Controller", func() {
 		})
 
 		It("should reject update with both minAvailable and maxUnavailable set", func() {
-			key := types.NamespacedName{
-				Name:      "hc-pdb-minavail-maxunavail",
-				Namespace: testProcessNamespace,
-			}
 			minAvail := intstr.FromInt(1)
 			maxUnavail := intstr.FromInt(1)
 			hc := suite.ConstructBasicSingleNodeHumioCluster(key, true)
@@ -6187,10 +6172,6 @@ var _ = Describe("HumioCluster Controller", func() {
 		})
 
 		It("should not create PDB if neither minAvailable nor maxUnavailable is set", func() {
-			key := types.NamespacedName{
-				Name:      "hc-pdb-no-minavail-maxunavail",
-				Namespace: testProcessNamespace,
-			}
 			hc := suite.ConstructBasicSingleNodeHumioCluster(key, true)
 			hc.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{
 				{
