@@ -101,9 +101,6 @@ type HumioClusterSpec struct {
 
 	// NodePools can be used to define additional groups of Humio cluster pods that share a set of configuration.
 	NodePools []HumioNodePoolSpec `json:"nodePools,omitempty"`
-
-	// PodDisruptionBudget defines the configuration for the PodDisruptionBudget
-	PodDisruptionBudget *PodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
 }
 
 type HumioNodeSpec struct {
@@ -307,7 +304,15 @@ type HumioNodePoolSpec struct {
 	//+required
 	Name string `json:"name"`
 
+	// MinAvailable represents the minimum number of pods that should be available for this Humio node pool.
+	// If not set, the operator will not create a PodDisruptionBudget for the node pool.
+	// Can be a percentage or a fixed number.
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+
+	// MaxUnavailable represents the maximum number of pods that can be unavailable for this Humio node pool
+	// If not set, the operator will not use a MaxUnavailable value for the node pool's PodDisruptionBudget.
+	// Can be a percentage or a fixed number.
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 
 	HumioNodeSpec `json:"spec,omitempty"`
 }
@@ -473,15 +478,4 @@ func (l HumioPodStatusList) Swap(i, j int) {
 
 func init() {
 	SchemeBuilder.Register(&HumioCluster{}, &HumioClusterList{})
-}
-
-// PodDisruptionBudgetSpec defines the configuration for the PodDisruptionBudget
-type PodDisruptionBudgetSpec struct {
-	// MinAvailable specifies the minimum number of pods that must be available
-	// +optional
-	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
-
-	// MaxUnavailable specifies the maximum number of pods that can be unavailable
-	// +optional
-	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
