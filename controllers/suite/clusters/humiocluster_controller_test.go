@@ -6056,13 +6056,75 @@ var _ = Describe("HumioCluster Controller", func() {
 				Namespace: testProcessNamespace,
 			}
 
+			// Ensure cleanup of any existing HumioCluster before each test
+			existingCluster := &humiov1alpha1.HumioCluster{}
+			err := k8sClient.Get(ctx, key, existingCluster)
+			if err == nil {
+				suite.CleanupCluster(ctx, k8sClient, existingCluster)
+			} else if !k8serrors.IsNotFound(err) {
+				Fail(fmt.Sprintf("Failed to get existing HumioCluster: %v", err))
+			}
+
+			// Clean up secret pdb-test-license, similar to other tests
 			existingSecret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("%s-license", key.Name),
+					Name:      "pdb-test-license",
 					Namespace: key.Namespace,
 				},
 			}
-			_ = k8sClient.Delete(ctx, existingSecret)
+			err = k8sClient.Delete(ctx, existingSecret)
+			if err != nil && !k8serrors.IsNotFound(err) {
+				Fail(fmt.Sprintf("Failed to delete existing secret %s: %v", existingSecret.Name, err))
+			}
+
+			// Wait until the secret is fully deleted
+			Eventually(func() error {
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: "pdb-test-license", Namespace: key.Namespace}, existingSecret)
+				if k8serrors.IsNotFound(err) {
+					return nil
+				}
+				return err
+			}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
+
+			// Call CleanupPDBTestSecret to delete the admin token secret
+			adminTokenSecretName := "pdb-test-admin-token"
+			suite.CleanupPDBTestSecret(ctx, k8sClient, adminTokenSecretName, key.Namespace)
+		})
+
+		AfterEach(func() {
+			// Clean up HumioCluster after each test
+			existingCluster := &humiov1alpha1.HumioCluster{}
+			err := k8sClient.Get(ctx, key, existingCluster)
+			if err == nil {
+				suite.CleanupCluster(ctx, k8sClient, existingCluster)
+			} else if !k8serrors.IsNotFound(err) {
+				Fail(fmt.Sprintf("Failed to get existing HumioCluster during cleanup: %v", err))
+			}
+
+			// Clean up secret pdb-test-license
+			existingSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pdb-test-license",
+					Namespace: key.Namespace,
+				},
+			}
+			err = k8sClient.Delete(ctx, existingSecret)
+			if err != nil && !k8serrors.IsNotFound(err) {
+				Fail(fmt.Sprintf("Failed to delete existing secret %s during cleanup: %v", existingSecret.Name, err))
+			}
+
+			// Wait until the secret is fully deleted
+			Eventually(func() error {
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: "pdb-test-license", Namespace: key.Namespace}, existingSecret)
+				if k8serrors.IsNotFound(err) {
+					return nil
+				}
+				return err
+			}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
+
+			// Clean up admin token secret
+			adminTokenSecretName := "pdb-test-admin-token"
+			suite.CleanupPDBTestSecret(ctx, k8sClient, adminTokenSecretName, key.Namespace)
 		})
 
 		It("should not create PDB for single-node pool", func() {
@@ -6160,6 +6222,7 @@ var _ = Describe("HumioCluster Controller", func() {
 			suite.CreateAndBootstrapCluster(ctx, k8sClient, testHumioClient, hc, true, humiov1alpha1.HumioClusterStateRunning, testTimeout)
 			defer suite.CleanupCluster(ctx, k8sClient, hc)
 
+			// Use Eventually to update the HumioCluster as seen in other tests
 			Eventually(func() error {
 				updated := &humiov1alpha1.HumioCluster{}
 				err := k8sClient.Get(ctx, key, updated)
