@@ -348,6 +348,35 @@ func CreateAndBootstrapCluster(ctx context.Context, k8sClient client.Client, hum
 		Name:      cluster.Name,
 	}
 
+	if helpers.UseEnvtest() {
+		// Clean up any existing bootstrap tokens first
+		existingToken := &humiov1alpha1.HumioBootstrapToken{}
+		err := k8sClient.Get(ctx, types.NamespacedName{
+			Name:      key.Name,
+			Namespace: key.Namespace,
+		}, existingToken)
+		if err == nil {
+			Expect(k8sClient.Delete(ctx, existingToken)).To(Succeed())
+			// Wait for deletion
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      key.Name,
+					Namespace: key.Namespace,
+				}, existingToken)
+				return k8serrors.IsNotFound(err)
+			}, testTimeout, TestInterval).Should(BeTrue())
+		}
+	}
+
+	// Add debug logging for cluster state transitions
+	defer func() {
+		updatedCluster := &humiov1alpha1.HumioCluster{}
+		err := k8sClient.Get(ctx, key, updatedCluster)
+		if err == nil {
+			fmt.Printf("Cluster state at end: %s\n", updatedCluster.Status.State)
+		}
+	}()
+
 	if autoCreateLicense {
 		CreateLicenseSecret(ctx, key, k8sClient, cluster)
 	}
@@ -427,12 +456,14 @@ func CreateAndBootstrapCluster(ctx context.Context, k8sClient client.Client, hum
 	UsingClusterBy(key.Name, "Confirming cluster enters running state")
 	var updatedHumioCluster humiov1alpha1.HumioCluster
 	Eventually(func() string {
-		err := k8sClient.Get(ctx, key, &updatedHumioCluster)
-		if err != nil && !k8serrors.IsNotFound(err) {
-			Expect(err).Should(Succeed())
+		updatedCluster := &humiov1alpha1.HumioCluster{}
+		err := k8sClient.Get(ctx, key, updatedCluster)
+		if err != nil {
+			return ""
 		}
-		return updatedHumioCluster.Status.State
-	}, testTimeout, TestInterval).Should(BeIdenticalTo(humiov1alpha1.HumioClusterStateRunning))
+		fmt.Printf("Current cluster state: %s\n", updatedCluster.Status.State)
+		return updatedCluster.Status.State
+	}, testTimeout, TestInterval).Should(Equal(expectedState))
 
 	for _, nodePool := range cluster.Spec.NodePools {
 		pdbName := fmt.Sprintf("%s-%s-pdb", cluster.Name, nodePool.Name)
@@ -779,23 +810,18 @@ func SimulateHumioBootstrapTokenCreatingSecretAndUpdatingStatus(ctx context.Cont
 func CleanupPDBTestSecret(ctx context.Context, k8sClient client.Client, secretName, namespace string) {
 	existingSecret := &corev1.Secret{}
 	err := k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: namespace}, existingSecret)
-	if err != nil && !k8serrors.IsNotFound(err) {
-		Fail(fmt.Sprintf("Failed to get existing secret %s during cleanup: %v", secretName, err))
-	}
-
 	if err == nil {
-		err = k8sClient.Delete(ctx, existingSecret)
-		if err != nil && !k8serrors.IsNotFound(err) {
+		if err := k8sClient.Delete(ctx, existingSecret); err != nil && !k8serrors.IsNotFound(err) {
 			Fail(fmt.Sprintf("Failed to delete existing secret %s during cleanup: %v", secretName, err))
 		}
-
-		// Wait until the secret is fully deleted
-		Eventually(func() error {
-			err := k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: namespace}, existingSecret)
-			if k8serrors.IsNotFound(err) {
-				return nil
-			}
-			return err
-		}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
 	}
+
+	// Always wait to ensure the secret is gone
+	Eventually(func() error {
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: namespace}, existingSecret)
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("secret still exists")
+	}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
 }

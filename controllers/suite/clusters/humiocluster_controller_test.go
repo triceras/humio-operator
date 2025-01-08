@@ -6056,29 +6056,29 @@ var _ = Describe("HumioCluster Controller", func() {
 				Namespace: testProcessNamespace,
 			}
 
-			// Clean up bootstrap token secret
+			// First clean up any existing cluster
+			existingCluster := &humiov1alpha1.HumioCluster{}
+			err := k8sClient.Get(ctx, key, existingCluster)
+			if err == nil {
+				suite.CleanupCluster(ctx, k8sClient, existingCluster)
+			}
+
+			// Clean up bootstrap token and secret
 			bootstrapSecret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      fmt.Sprintf("%s-bootstrap-token", key.Name),
 					Namespace: key.Namespace,
 				},
 			}
-			err := k8sClient.Delete(ctx, bootstrapSecret)
-			if err != nil && !k8serrors.IsNotFound(err) {
-				Fail(fmt.Sprintf("Failed to delete bootstrap secret: %v", err))
-			}
+			_ = k8sClient.Delete(ctx, bootstrapSecret)
 
-			// Clean up bootstrap token CR
 			bootstrapToken := &humiov1alpha1.HumioBootstrapToken{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      key.Name,
 					Namespace: key.Namespace,
 				},
 			}
-			err = k8sClient.Delete(ctx, bootstrapToken)
-			if err != nil && !k8serrors.IsNotFound(err) {
-				Fail(fmt.Sprintf("Failed to delete bootstrap token: %v", err))
-			}
+			_ = k8sClient.Delete(ctx, bootstrapToken)
 
 			// Wait for bootstrap resources deletion
 			Eventually(func() bool {
@@ -6103,6 +6103,10 @@ var _ = Describe("HumioCluster Controller", func() {
 		})
 
 		AfterEach(func() {
+			// Clean up for the secret created for the test
+			adminTokenSecretName := fmt.Sprintf("%s-admin-token", key.Name)
+			suite.CleanupPDBTestSecret(ctx, k8sClient, adminTokenSecretName, key.Namespace)
+
 			// Clean up HumioCluster after each test
 			existingCluster := &humiov1alpha1.HumioCluster{}
 			err := k8sClient.Get(ctx, key, existingCluster)
