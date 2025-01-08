@@ -17,6 +17,7 @@ import (
 	"github.com/humio/humio-operator/internal/humio"
 	"github.com/humio/humio-operator/internal/kubernetes"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -433,6 +434,28 @@ func CreateAndBootstrapCluster(ctx context.Context, k8sClient client.Client, hum
 		return updatedHumioCluster.Status.State
 	}, testTimeout, TestInterval).Should(BeIdenticalTo(humiov1alpha1.HumioClusterStateRunning))
 
+	for _, nodePool := range cluster.Spec.NodePools {
+		pdbName := fmt.Sprintf("%s-%s-pdb", cluster.Name, nodePool.Name)
+
+		// Conditions for PDB Creation
+		if nodePool.MinAvailable != nil || nodePool.MaxUnavailable != nil {
+			if nodePool.NodeCount > 1 {
+				// PDB Existence Check
+				Eventually(func() error {
+					pdb := &policyv1.PodDisruptionBudget{}
+					return k8sClient.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: cluster.Namespace}, pdb)
+				}, testTimeout, TestInterval).Should(Succeed(), fmt.Sprintf("PDB %s not found for node pool %s", pdbName, nodePool.Name))
+			}
+		} else {
+			// PDB Non-Existence Check
+			Consistently(func() bool {
+				pdb := &policyv1.PodDisruptionBudget{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: cluster.Namespace}, pdb)
+				return k8serrors.IsNotFound(err)
+			}, testTimeout, TestInterval).Should(BeTrue(), fmt.Sprintf("Unexpected PDB %s found for node pool %s", pdbName, nodePool.Name))
+		}
+	}
+
 	UsingClusterBy(key.Name, "Waiting to have the correct number of pods")
 
 	Eventually(func() []corev1.Pod {
@@ -751,4 +774,28 @@ func SimulateHumioBootstrapTokenCreatingSecretAndUpdatingStatus(ctx context.Cont
 		}
 		return k8sClient.Status().Update(ctx, &updatedHumioBootstrapToken)
 	}, testTimeout, TestInterval).Should(Succeed())
+}
+
+func CleanupPDBTestSecret(ctx context.Context, k8sClient client.Client, secretName, namespace string) {
+	existingSecret := &corev1.Secret{}
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: namespace}, existingSecret)
+	if err != nil && !k8serrors.IsNotFound(err) {
+		Fail(fmt.Sprintf("Failed to get existing secret %s during cleanup: %v", secretName, err))
+	}
+
+	if err == nil {
+		err = k8sClient.Delete(ctx, existingSecret)
+		if err != nil && !k8serrors.IsNotFound(err) {
+			Fail(fmt.Sprintf("Failed to delete existing secret %s during cleanup: %v", secretName, err))
+		}
+
+		// Wait until the secret is fully deleted
+		Eventually(func() error {
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: namespace}, existingSecret)
+			if k8serrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
+	}
 }

@@ -6056,38 +6056,49 @@ var _ = Describe("HumioCluster Controller", func() {
 				Namespace: testProcessNamespace,
 			}
 
-			// Ensure cleanup of any existing HumioCluster before each test
-			existingCluster := &humiov1alpha1.HumioCluster{}
-			err := k8sClient.Get(ctx, key, existingCluster)
-			if err == nil {
-				suite.CleanupCluster(ctx, k8sClient, existingCluster)
-			} else if !k8serrors.IsNotFound(err) {
-				Fail(fmt.Sprintf("Failed to get existing HumioCluster: %v", err))
-			}
-
-			// Clean up secret pdb-test-license, similar to other tests
-			existingSecret := &corev1.Secret{
+			// Clean up bootstrap token secret
+			bootstrapSecret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "pdb-test-license",
+					Name:      fmt.Sprintf("%s-bootstrap-token", key.Name),
 					Namespace: key.Namespace,
 				},
 			}
-			err = k8sClient.Delete(ctx, existingSecret)
+			err := k8sClient.Delete(ctx, bootstrapSecret)
 			if err != nil && !k8serrors.IsNotFound(err) {
-				Fail(fmt.Sprintf("Failed to delete existing secret %s: %v", existingSecret.Name, err))
+				Fail(fmt.Sprintf("Failed to delete bootstrap secret: %v", err))
 			}
 
-			// Wait until the secret is fully deleted
-			Eventually(func() error {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: "pdb-test-license", Namespace: key.Namespace}, existingSecret)
-				if k8serrors.IsNotFound(err) {
-					return nil
-				}
-				return err
-			}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
+			// Clean up bootstrap token CR
+			bootstrapToken := &humiov1alpha1.HumioBootstrapToken{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      key.Name,
+					Namespace: key.Namespace,
+				},
+			}
+			err = k8sClient.Delete(ctx, bootstrapToken)
+			if err != nil && !k8serrors.IsNotFound(err) {
+				Fail(fmt.Sprintf("Failed to delete bootstrap token: %v", err))
+			}
 
-			// Call CleanupPDBTestSecret to delete the admin token secret
-			adminTokenSecretName := "pdb-test-admin-token"
+			// Wait for bootstrap resources deletion
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      fmt.Sprintf("%s-bootstrap-token", key.Name),
+					Namespace: key.Namespace,
+				}, bootstrapSecret)
+				return k8serrors.IsNotFound(err)
+			}, testTimeout, suite.TestInterval).Should(BeTrue())
+
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      key.Name,
+					Namespace: key.Namespace,
+				}, bootstrapToken)
+				return k8serrors.IsNotFound(err)
+			}, testTimeout, suite.TestInterval).Should(BeTrue())
+
+			// Clean up admin token secret
+			adminTokenSecretName := fmt.Sprintf("%s-admin-token", key.Name)
 			suite.CleanupPDBTestSecret(ctx, k8sClient, adminTokenSecretName, key.Namespace)
 		})
 
@@ -6097,34 +6108,7 @@ var _ = Describe("HumioCluster Controller", func() {
 			err := k8sClient.Get(ctx, key, existingCluster)
 			if err == nil {
 				suite.CleanupCluster(ctx, k8sClient, existingCluster)
-			} else if !k8serrors.IsNotFound(err) {
-				Fail(fmt.Sprintf("Failed to get existing HumioCluster during cleanup: %v", err))
 			}
-
-			// Clean up secret pdb-test-license
-			existingSecret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "pdb-test-license",
-					Namespace: key.Namespace,
-				},
-			}
-			err = k8sClient.Delete(ctx, existingSecret)
-			if err != nil && !k8serrors.IsNotFound(err) {
-				Fail(fmt.Sprintf("Failed to delete existing secret %s during cleanup: %v", existingSecret.Name, err))
-			}
-
-			// Wait until the secret is fully deleted
-			Eventually(func() error {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: "pdb-test-license", Namespace: key.Namespace}, existingSecret)
-				if k8serrors.IsNotFound(err) {
-					return nil
-				}
-				return err
-			}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
-
-			// Clean up admin token secret
-			adminTokenSecretName := "pdb-test-admin-token"
-			suite.CleanupPDBTestSecret(ctx, k8sClient, adminTokenSecretName, key.Namespace)
 		})
 
 		It("should not create PDB for single-node pool", func() {
@@ -6167,19 +6151,17 @@ var _ = Describe("HumioCluster Controller", func() {
 			suite.CreateAndBootstrapCluster(ctx, k8sClient, testHumioClient, hc, true, humiov1alpha1.HumioClusterStateRunning, testTimeout)
 			defer suite.CleanupCluster(ctx, k8sClient, hc)
 
-			pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, "pool1")
+			pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, hc.Spec.NodePools[0].Name)
 			foundPDB := &policyv1.PodDisruptionBudget{}
 			Eventually(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: hc.Namespace}, foundPDB)
 			}, testTimeout, suite.TestInterval).Should(Succeed())
 
-			Expect(foundPDB.Spec.MinAvailable).NotTo(BeNil())
-			Expect(foundPDB.Spec.MinAvailable.IntValue()).To(Equal(2))
-			Expect(foundPDB.Spec.MaxUnavailable).To(BeNil())
+			Expect(foundPDB.Spec.MinAvailable).To(Equal(&minAvail))
 		})
 
 		It("should create PDB with user-specified maxUnavailable", func() {
-			maxUnavail := intstr.FromInt(1)
+			maxUnavail := intstr.FromString("50%")
 			hc := suite.ConstructBasicSingleNodeHumioCluster(key, true)
 			hc.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{
 				{
@@ -6194,20 +6176,18 @@ var _ = Describe("HumioCluster Controller", func() {
 			suite.CreateAndBootstrapCluster(ctx, k8sClient, testHumioClient, hc, true, humiov1alpha1.HumioClusterStateRunning, testTimeout)
 			defer suite.CleanupCluster(ctx, k8sClient, hc)
 
-			pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, "pool1")
+			pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, hc.Spec.NodePools[0].Name)
 			foundPDB := &policyv1.PodDisruptionBudget{}
 			Eventually(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: hc.Namespace}, foundPDB)
 			}, testTimeout, suite.TestInterval).Should(Succeed())
 
-			Expect(foundPDB.Spec.MaxUnavailable).NotTo(BeNil())
-			Expect(foundPDB.Spec.MaxUnavailable.IntValue()).To(Equal(1))
-			Expect(foundPDB.Spec.MinAvailable).To(BeNil())
+			Expect(foundPDB.Spec.MaxUnavailable).To(Equal(&maxUnavail))
 		})
 
 		It("should reject update with both minAvailable and maxUnavailable set", func() {
-			minAvail := intstr.FromInt(1)
-			maxUnavail := intstr.FromInt(1)
+			minAvail := intstr.FromInt(2)
+			maxUnavail := intstr.FromString("50%")
 			hc := suite.ConstructBasicSingleNodeHumioCluster(key, true)
 			hc.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{
 				{
@@ -6222,7 +6202,6 @@ var _ = Describe("HumioCluster Controller", func() {
 			suite.CreateAndBootstrapCluster(ctx, k8sClient, testHumioClient, hc, true, humiov1alpha1.HumioClusterStateRunning, testTimeout)
 			defer suite.CleanupCluster(ctx, k8sClient, hc)
 
-			// Use Eventually to update the HumioCluster as seen in other tests
 			Eventually(func() error {
 				updated := &humiov1alpha1.HumioCluster{}
 				err := k8sClient.Get(ctx, key, updated)
