@@ -35,7 +35,6 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/strings/slices"
@@ -145,9 +144,11 @@ func (r *HumioClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Reconcile PDBs
-	if err := r.reconcilePodDisruptionBudgets(ctx, hc); err != nil {
+	if result, err := r.reconcilePodDisruptionBudgets(ctx, hc); err != nil {
 		r.Log.Error(err, "Failed to reconcile PodDisruptionBudgets.")
-		return ctrl.Result{}, err
+		return result, err // Now returning both result and err
+	} else if result.Requeue || result.RequeueAfter > 0 {
+		return result, nil // Return the result if requeue needed
 	}
 
 	// update status with observed generation
@@ -2396,21 +2397,20 @@ func (r *HumioClusterReconciler) podLabelsForHumio(name string) map[string]strin
 
 // PDB implementation
 // reconcilePodDisruptionBudgets ensures the correct PodDisruptionBudgets for all node pools
-func (r *HumioClusterReconciler) reconcilePodDisruptionBudgets(ctx context.Context, hc *humiov1alpha1.HumioCluster) error {
+func (r *HumioClusterReconciler) reconcilePodDisruptionBudgets(ctx context.Context, hc *humiov1alpha1.HumioCluster) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// (1) Create or update PDB for each node pool
 	for _, nodePool := range hc.Spec.NodePools {
 		pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, nodePool.Name)
 
-		shouldCreate := shouldCreatePDBForNodePool(nodePool)
-		if !shouldCreate {
+		if !shouldCreatePDBForNodePool(nodePool) {
 			// If we shouldn't create, ensure it's deleted if it exists
 			existingPDB := &policyv1.PodDisruptionBudget{}
 			if err := r.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: hc.Namespace}, existingPDB); err == nil {
-				logger.Info("Deleting PDB for node pool", "pdbName", pdbName, "nodePool", nodePool.Name)
+				logger.Info("Deleting PDB for node pool as it should not exist", "pdbName", pdbName, "nodePool", nodePool.Name)
 				if delErr := r.Delete(ctx, existingPDB); delErr != nil && !k8serrors.IsNotFound(delErr) {
-					return fmt.Errorf("unable to delete PDB %s: %w", pdbName, delErr)
+					return ctrl.Result{}, fmt.Errorf("unable to delete PDB %s: %w", pdbName, delErr)
 				}
 			}
 			continue // skip creation
@@ -2418,7 +2418,7 @@ func (r *HumioClusterReconciler) reconcilePodDisruptionBudgets(ctx context.Conte
 
 		desiredPDB, err := r.buildNodePoolPDB(ctx, hc, nodePool)
 		if err != nil {
-			return err
+			return ctrl.Result{}, err
 		}
 
 		existingPDB := &policyv1.PodDisruptionBudget{}
@@ -2427,18 +2427,19 @@ func (r *HumioClusterReconciler) reconcilePodDisruptionBudgets(ctx context.Conte
 			if k8serrors.IsNotFound(err) {
 				logger.Info("Creating PDB for node pool", "pdbName", pdbName, "nodePool", nodePool.Name)
 				if createErr := r.Create(ctx, desiredPDB); createErr != nil {
-					return fmt.Errorf("unable to create PDB %s: %w", pdbName, createErr)
+					return ctrl.Result{}, fmt.Errorf("unable to create PDB %s: %w", pdbName, createErr)
 				}
 			} else {
-				return fmt.Errorf("unable to get PDB %s: %w", pdbName, err)
+				return ctrl.Result{}, fmt.Errorf("unable to get PDB %s: %w", pdbName, err)
 			}
 		} else {
 			// Update existing if needed
 			if !arePDBsEqual(existingPDB, desiredPDB) {
+				logger.Info("Updating PDB", "pdbName", pdbName)
 				existingPDB.Spec = desiredPDB.Spec
-				existingPDB.Labels = desiredPDB.Labels
+				// Labels don't need to be updated as they are part of metadata
 				if updateErr := r.Update(ctx, existingPDB); updateErr != nil {
-					return fmt.Errorf("unable to update PDB %s: %w", pdbName, updateErr)
+					return ctrl.Result{}, fmt.Errorf("unable to update PDB %s: %w", pdbName, updateErr)
 				}
 			}
 		}
@@ -2446,24 +2447,19 @@ func (r *HumioClusterReconciler) reconcilePodDisruptionBudgets(ctx context.Conte
 
 	// (2) Clean up orphaned PDBs that no longer match any node pool
 	if err := r.cleanupOrphanedNodePoolPDBs(ctx, hc); err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 
-	return nil
+	return ctrl.Result{}, nil
 }
 
 // buildNodePoolPDB constructs a PodDisruptionBudget for the specified node pool
 func (r *HumioClusterReconciler) buildNodePoolPDB(ctx context.Context, hc *humiov1alpha1.HumioCluster, nodePool humiov1alpha1.HumioNodePoolSpec) (*policyv1.PodDisruptionBudget, error) {
+	logger := log.FromContext(ctx)
 	pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, nodePool.Name)
 
-	// Decide minAvailable or maxUnavailable from nodePool
-	minAvail, maxUnavail := gatherMinAvailMaxUnavail(nodePool)
-
-	labels := map[string]string{
-		"app":        "humio",
-		"humio_cr":   hc.Name,
-		"humio_pool": nodePool.Name,
-	}
+	// Use PDB-standard selector labels
+	labels := pdbSelectorLabels(hc.Name, nodePool.Name)
 
 	pdb := &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2473,52 +2469,32 @@ func (r *HumioClusterReconciler) buildNodePoolPDB(ctx context.Context, hc *humio
 		},
 		Spec: policyv1.PodDisruptionBudgetSpec{
 			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app":        "humio",
-					"humio_cr":   hc.Name,
-					"humio_pool": nodePool.Name,
-				},
+				MatchLabels: labels,
 			},
 		},
 	}
 
-	if minAvail != nil {
-		pdb.Spec.MinAvailable = minAvail
+	// Set only one of MinAvailable or MaxUnavailable based on NodePool configuration
+	if nodePool.MinAvailable != nil {
+		pdb.Spec.MinAvailable = nodePool.MinAvailable
+	} else if nodePool.MaxUnavailable != nil {
+		pdb.Spec.MaxUnavailable = nodePool.MaxUnavailable
+	} else {
+		// By default, if neither are specified and node pool has more than one node we set MaxUnavailable to 1.
+		if nodePool.NodeCount > 1 {
+			pdb.Spec.MaxUnavailable = &intstr.IntOrString{Type: intstr.Int, IntVal: 1}
+		} else {
+			logger.Info("Neither minAvailable nor maxUnavailable set and node pool has only one node, defaulting to maxUnavailable=0", "nodePool", nodePool.Name)
+			pdb.Spec.MaxUnavailable = &intstr.IntOrString{Type: intstr.Int, IntVal: 0}
+		}
 	}
-	if maxUnavail != nil {
-		pdb.Spec.MaxUnavailable = maxUnavail
-	}
-
-	// Ensure PDB is owned by the HumioCluster
-	if err := controllerutil.SetControllerReference(hc, pdb, r.schemeForPDB()); err != nil {
-		return nil, fmt.Errorf("failed to set controller reference for PDB %s: %w", pdbName, err)
-	}
-
 	return pdb, nil
-}
-
-// gatherMinAvailMaxUnavail checks the nodePool constraints to build the IntOrString for minAvailable or maxUnavailable
-func gatherMinAvailMaxUnavail(nodePool humiov1alpha1.HumioNodePoolSpec) (*intstr.IntOrString, *intstr.IntOrString) {
-	if nodePool.MinAvailable == nil && nodePool.MaxUnavailable == nil {
-		// If you want a default "minAvailable=1" unless specified, uncomment below line
-		// return &intstr.IntOrString{Type: intstr.Int, IntVal: 1}, nil
-		return nil, nil
-	}
-	// Only one allowed by your logic
-	return nodePool.MinAvailable, nodePool.MaxUnavailable
 }
 
 // shouldCreatePDBForNodePool determines if we should create a PDB for the node pool
 func shouldCreatePDBForNodePool(nodePool humiov1alpha1.HumioNodePoolSpec) bool {
-	// Skip if nodeCount <= 1
-	if nodePool.NodeCount <= 1 {
-		return false
-	}
-	// Skip if neither minAvailable nor maxUnavailable is set
-	if nodePool.MinAvailable == nil && nodePool.MaxUnavailable == nil {
-		return false
-	}
-	return true
+	// Only create a PDB if the node pool has a configured value for MinAvailable or MaxUnavailable
+	return nodePool.MinAvailable != nil || nodePool.MaxUnavailable != nil
 }
 
 // cleanupOrphanedNodePoolPDBs deletes any PDB in the namespace that belongs to this cluster but
@@ -2533,9 +2509,8 @@ func (r *HumioClusterReconciler) cleanupOrphanedNodePoolPDBs(ctx context.Context
 	}
 
 	for _, pdb := range list.Items {
-		// If this PDB is not named <clusterName>-<nodePoolName>-pdb, it could be orphaned
-		// Check if there's a matching nodePool
-		if !pdbBelongsToCurrentNodePools(pdb, hc) {
+		// If this PDB's labels do not match a current node pool, delete it
+		if !r.pdbBelongsToCurrentNodePools(ctx, pdb, hc) {
 			logger.Info("Deleting orphaned PDB", "pdb", pdb.Name)
 			if delErr := r.Delete(ctx, &pdb); delErr != nil && !k8serrors.IsNotFound(delErr) {
 				return fmt.Errorf("failed to delete orphaned PDB %s: %w", pdb.Name, delErr)
@@ -2545,38 +2520,31 @@ func (r *HumioClusterReconciler) cleanupOrphanedNodePoolPDBs(ctx context.Context
 	return nil
 }
 
-// pdbBelongsToCurrentNodePools checks if the given PDB name or labels match a node pool in the HumioCluster
-func pdbBelongsToCurrentNodePools(pdb policyv1.PodDisruptionBudget, hc *humiov1alpha1.HumioCluster) bool {
+// pdbBelongsToCurrentNodePools checks if the given PDB labels match a node pool in the HumioCluster
+func (r *HumioClusterReconciler) pdbBelongsToCurrentNodePools(ctx context.Context, pdb policyv1.PodDisruptionBudget, hc *humiov1alpha1.HumioCluster) bool {
+	logger := log.FromContext(ctx)
 	for _, np := range hc.Spec.NodePools {
-		expectedName := fmt.Sprintf("%s-%s-pdb", hc.Name, np.Name)
-		if pdb.Name == expectedName {
+		expectedLabels := pdbSelectorLabels(hc.Name, np.Name)
+		if reflect.DeepEqual(pdb.Labels, expectedLabels) {
 			return true
 		}
 	}
+	logger.Info("PDB does not belong to current node pools", "pdbName", pdb.Name)
 	return false
 }
 
-// Checks if two PDBs have the same spec
-func arePDBsEqual(existing, desired *policyv1.PodDisruptionBudget) bool {
-	if !reflect.DeepEqual(existing.Spec.Selector, desired.Spec.Selector) {
-		return false
+// pdbSelectorLabels returns the standard label set for selecting pods within a node pool
+func pdbSelectorLabels(clusterName, nodePoolName string) map[string]string {
+	return map[string]string{
+		"app":        "humio",
+		"humio_cr":   clusterName,
+		"humio_pool": nodePoolName,
 	}
-	if !reflect.DeepEqual(existing.Spec.MinAvailable, desired.Spec.MinAvailable) {
-		return false
-	}
-	if !reflect.DeepEqual(existing.Spec.MaxUnavailable, desired.Spec.MaxUnavailable) {
-		return false
-	}
-	if !reflect.DeepEqual(existing.Labels, desired.Labels) {
-		return false
-	}
-	return true
 }
 
-// schemeForPDB obtains the scheme for the PDB
-// If you already have r.Scheme, you can reuse that. Example below:
-func (r *HumioClusterReconciler) schemeForPDB() *runtime.Scheme {
-	return r.Scheme()
+// arePDBsEqual checks if two PDBs have the same spec, ignoring generated fields
+func arePDBsEqual(existing, desired *policyv1.PodDisruptionBudget) bool {
+	return reflect.DeepEqual(existing.Spec, desired.Spec)
 }
 
 // validateClusterNodePools validates that we do not set both minAvailable and maxUnavailable for each node pool

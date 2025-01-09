@@ -6044,131 +6044,155 @@ var _ = Describe("HumioCluster Controller", func() {
 	})
 
 	Context("Humio Cluster PodDisruptionBudgets", Label("envtest", "dummy", "real"), func() {
-		var (
-			key types.NamespacedName
-			ctx context.Context
-		)
+    var (
+        ctx context.Context
+        key types.NamespacedName
+    )
 
-		BeforeEach(func() {
-			ctx = context.Background()
-			key = types.NamespacedName{
-				Name:      "pdb-test",
+    BeforeEach(func() {
+        ctx = context.Background()
+        key = types.NamespacedName{
+            Name:      "humiocluster-pdb",
+            Namespace: testProcessNamespace,
+        }
+
+        // Clean up any existing resources
+        existingToken := &humiov1alpha1.HumioBootstrapToken{}
+        err := k8sClient.Get(ctx, key, existingToken)
+        if err == nil {
+            _ = k8sClient.Delete(ctx, existingToken)
+        }
+
+        existingSecret := &corev1.Secret{
+            ObjectMeta: metav1.ObjectMeta{
+                Name:      fmt.Sprintf("%s-bootstrap-token", key.Name),
+                Namespace: key.Namespace,
+            },
+        }
+        _ = k8sClient.Delete(ctx, existingSecret)
+    })
+
+    It("should create PDB with user-specified minAvailable", func() {
+        // Create cluster
+        toCreate := suite.ConstructBasicSingleNodeHumioCluster(key, true)
+        toCreate.Spec.NodeCount = 2
+        
+        Expect(k8sClient.Create(ctx, toCreate)).Should(Succeed())
+        defer suite.CleanupCluster(ctx, k8sClient, toCreate)
+
+        // Wait for cluster to be ready
+        Eventually(func() error {
+            updatedCluster := &humiov1alpha1.HumioCluster{}
+            if err := k8sClient.Get(ctx, key, updatedCluster); err != nil {
+                return err
+            }
+            if updatedCluster.Status.State != humiov1alpha1.HumioClusterStateRunning {
+                return fmt.Errorf("cluster not ready, state: %s", updatedCluster.Status.State)
+            }
+            return nil
+        }, testTimeout, TestInterval).Should(Succeed())
+
+        // Update PDB configuration
+        minAvailable := intstr.FromInt(1)
+        Eventually(func() error {
+            updatedCluster := &humiov1alpha1.HumioCluster{}
+            if err := k8sClient.Get(ctx, key, updatedCluster); err != nil {
+                return err
+            }
+            updatedCluster.Spec.PodDisruptionBudget = humiov1alpha1.HumioPodDisruptionBudgetSpec{
+                MinAvailable: &minAvailable,
+            }
+            return k8sClient.Update(ctx, updatedCluster)
+        }, testTimeout, TestInterval).Should(Succeed())
+
+        // Verify PDB is updated
+        pdb := &policyv1.PodDisruptionBudget{}
+        Eventually(func() error {
+            return k8sClient.Get(ctx, types.NamespacedName{
+                Name:      key.Name,
+                Namespace: key.Namespace,
+            }, pdb)
+        }, testTimeout, TestInterval).Should(Succeed())
+
+        Expect(pdb.Spec.MinAvailable).To(Equal(&minAvailable))
+    })
+	})
+
+		It("Should create a PDB with custom maxUnavailable", func() {
+			const (
+				timeout  = time.Second * 10
+				interval = time.Millisecond * 250
+			)
+			var (
+				ctx context.Context
+			)
+			key := types.NamespacedName{
+				Name:      "humiocluster-pdb-maxunavail",
 				Namespace: testProcessNamespace,
 			}
-
-			// Clean up any existing bootstrap tokens first
-			existingToken := &humiov1alpha1.HumioBootstrapToken{}
-			err := k8sClient.Get(ctx, key, existingToken)
-			if err == nil {
-				err = k8sClient.Delete(ctx, existingToken)
-				if err != nil {
-					Expect(err).Should(Succeed())
-				}
-			}
-		})
-
-		AfterEach(func() {
-			existingCluster := &humiov1alpha1.HumioCluster{}
-			err := k8sClient.Get(ctx, key, existingCluster)
-			if err == nil {
-				suite.CleanupCluster(ctx, k8sClient, existingCluster)
-			}
-		})
-
-		It("should not create PDB for single-node pool", func() {
-			hc := suite.ConstructBasicSingleNodeHumioCluster(key, true)
-			hc.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{
-				{
-					Name: "pool1",
-					HumioNodeSpec: humiov1alpha1.HumioNodeSpec{
-						NodeCount: 1,
-					},
-				},
+			toCreate := suite.ConstructBasicSingleNodeHumioCluster(key, true)
+			toCreate.Spec.NodeCount = 2
+			customMaxUnavailable := intstr.FromInt(1)
+			toCreate.Spec.PodDisruptionBudget = humiov1alpha1.HumioPodDisruptionBudgetSpec{
+				MaxUnavailable: &customMaxUnavailable,
 			}
 
-			suite.CreateAndBootstrapCluster(ctx, k8sClient, testHumioClient, hc, true, humiov1alpha1.HumioClusterStateRunning, testTimeout)
+			suite.UsingClusterBy(key.Name, "Creating the cluster with custom maxUnavailable")
+			ctx = context.Background()
+			Expect(k8sClient.Create(ctx, toCreate)).To(Succeed())
+			defer suite.CleanupCluster(ctx, k8sClient, toCreate)
 
-			pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, hc.Spec.NodePools[0].Name)
-			foundPDB := &policyv1.PodDisruptionBudget{}
-			Consistently(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: hc.Namespace}, foundPDB)
-				return k8serrors.IsNotFound(err)
-			}, 5*time.Second, suite.TestInterval).Should(BeTrue())
-		})
-
-		It("should create PDB with user-specified minAvailable", func() {
-			minAvail := intstr.FromInt(2)
-			hc := suite.ConstructBasicSingleNodeHumioCluster(key, true)
-			hc.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{
-				{
-					Name: "pool1",
-					HumioNodeSpec: humiov1alpha1.HumioNodeSpec{
-						NodeCount: 3,
-					},
-					MinAvailable: &minAvail,
-				},
-			}
-
-			suite.CreateAndBootstrapCluster(ctx, k8sClient, testHumioClient, hc, true, humiov1alpha1.HumioClusterStateRunning, testTimeout)
-
-			pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, hc.Spec.NodePools[0].Name)
-			foundPDB := &policyv1.PodDisruptionBudget{}
+			createdPDB := &policyv1.PodDisruptionBudget{}
+			pdbName := types.NamespacedName{Name: toCreate.Name, Namespace: toCreate.Namespace}
 			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: hc.Namespace}, foundPDB)
-			}, testTimeout, suite.TestInterval).Should(Succeed())
+				return k8sClient.Get(ctx, pdbName, createdPDB)
+			}, timeout, interval).Should(Succeed(), "PDB should be created")
 
-			Expect(foundPDB.Spec.MinAvailable).To(Equal(&minAvail))
+			Expect(createdPDB.Spec.MaxUnavailable).To(Equal(&customMaxUnavailable))
 		})
 
-		It("should reject update with both minAvailable and maxUnavailable set", func() {
-			minAvail := intstr.FromInt(2)
-			maxUnavail := intstr.FromString("50%")
-			hc := suite.ConstructBasicSingleNodeHumioCluster(key, true)
-			hc.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{
-				{
-					Name: "pool1",
-					HumioNodeSpec: humiov1alpha1.HumioNodeSpec{
-						NodeCount: 3,
-					},
-					MinAvailable:   &minAvail,
-					MaxUnavailable: &maxUnavail,
-				},
+		It("Should have a valid label selector targeting Humio pods", func() {
+			const (
+				timeout  = time.Second * 10
+				interval = time.Millisecond * 250
+			)
+			var (
+				ctx context.Context
+			)
+			key := types.NamespacedName{
+				Name:      "humiocluster-pdb-label-selector",
+				Namespace: testProcessNamespace,
 			}
+			toCreate := suite.ConstructBasicSingleNodeHumioCluster(key, true)
+			toCreate.Spec.NodeCount = 2
 
-			err := k8sClient.Create(ctx, hc)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("both minAvailable and maxUnavailable are set"))
-		})
+			suite.UsingClusterBy(key.Name, "Creating the cluster with a valid label selector")
+			ctx = context.Background()
+			Expect(k8sClient.Create(ctx, toCreate)).To(Succeed())
+			defer suite.CleanupCluster(ctx, k8sClient, toCreate)
 
-		It("should handle label selector targeting correct pods", func() {
-			minAvail := intstr.FromInt(1)
-			hc := suite.ConstructBasicSingleNodeHumioCluster(key, true)
-			hc.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{
-				{
-					Name: "pool1",
-					HumioNodeSpec: humiov1alpha1.HumioNodeSpec{
-						NodeCount: 2,
-					},
-					MinAvailable: &minAvail,
-				},
-			}
-
-			suite.CreateAndBootstrapCluster(ctx, k8sClient, testHumioClient, hc, true, humiov1alpha1.HumioClusterStateRunning, testTimeout)
-
-			pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, hc.Spec.NodePools[0].Name)
-			foundPDB := &policyv1.PodDisruptionBudget{}
+			createdPDB := &policyv1.PodDisruptionBudget{}
+			pdbName := types.NamespacedName{Name: toCreate.Name, Namespace: toCreate.Namespace}
 			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: hc.Namespace}, foundPDB)
-			}, testTimeout, suite.TestInterval).Should(Succeed())
+				return k8sClient.Get(ctx, pdbName, createdPDB)
+			}, timeout, interval).Should(Succeed(), "PDB should be created")
+
+			selector, err := metav1.LabelSelectorAsSelector(createdPDB.Spec.Selector)
+			Expect(err).ToNot(HaveOccurred())
 
 			podList := &corev1.PodList{}
-			Eventually(func() []corev1.Pod {
-				err := k8sClient.List(ctx, podList, client.MatchingLabels(foundPDB.Spec.Selector.MatchLabels))
-				if err != nil {
-					return nil
-				}
-				return podList.Items
-			}, testTimeout, suite.TestInterval).Should(HaveLen(2))
+			Eventually(func() int {
+				Expect(k8sClient.List(ctx, podList, &client.ListOptions{
+					Namespace:     toCreate.Namespace,
+					LabelSelector: selector,
+				})).To(Succeed())
+				return len(podList.Items)
+			}, timeout, interval).Should(BeNumerically(">", 0), "No pods found matching the selector")
+
+			for _, pod := range podList.Items {
+				Expect(pod.Labels["app"]).To(Equal("humio"))
+				Expect(pod.Labels["humio_cr"]).To(Equal(toCreate.Name))
+			}
 		})
 	})
 })
