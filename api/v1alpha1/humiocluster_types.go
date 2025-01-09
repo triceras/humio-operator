@@ -48,6 +48,12 @@ const (
 	HumioPersistentVolumeReclaimTypeOnNodeDelete = "OnNodeDelete"
 )
 
+// HumioPodDisruptionBudgetSpec defines optional PDB settings for a HumioCluster
+type HumioPodDisruptionBudgetSpec struct {
+	MinAvailable   *intstr.IntOrString `json:"minAvailable,omitempty"`
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+}
+
 // HumioClusterSpec defines the desired state of HumioCluster
 type HumioClusterSpec struct {
 	// AutoRebalancePartitions will enable auto-rebalancing of both digest and storage partitions assigned to humio cluster nodes.
@@ -101,6 +107,9 @@ type HumioClusterSpec struct {
 
 	// NodePools can be used to define additional groups of Humio cluster pods that share a set of configuration.
 	NodePools []HumioNodePoolSpec `json:"nodePools,omitempty"`
+
+	// PodDisruptionBudget allows configuring PDB for the cluster
+	PodDisruptionBudget *HumioPodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
 }
 
 type HumioNodeSpec struct {

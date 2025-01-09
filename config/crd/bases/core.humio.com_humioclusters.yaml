@@ -13172,6 +13172,20 @@ spec:
                 description: PodAnnotations can be used to specify annotations that
                   will be added to the Humio pods
                 type: object
+              podDisruptionBudget:
+                description: PodDisruptionBudget allows configuring PDB for the cluster
+                properties:
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    x-kubernetes-int-or-string: true
+                  minAvailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    x-kubernetes-int-or-string: true
+                type: object
               podLabels:
                 additionalProperties:
                   type: string
