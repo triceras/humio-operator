@@ -48,12 +48,6 @@ const (
 	HumioPersistentVolumeReclaimTypeOnNodeDelete = "OnNodeDelete"
 )
 
-// HumioPodDisruptionBudgetSpec defines optional PDB settings for a HumioCluster
-type HumioPodDisruptionBudgetSpec struct {
-	MinAvailable   *intstr.IntOrString `json:"minAvailable,omitempty"`
-	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
-}
-
 // HumioClusterSpec defines the desired state of HumioCluster
 type HumioClusterSpec struct {
 	// AutoRebalancePartitions will enable auto-rebalancing of both digest and storage partitions assigned to humio cluster nodes.
@@ -307,12 +301,19 @@ type HumioUpdateStrategy struct {
 	// By default, the max unavailable pods is 1.
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
-
 type HumioNodePoolSpec struct {
 	//+kubebuilder:validation:MinLength:=1
 	//+required
 	Name string `json:"name"`
 
+	// PodDisruptionBudget defines the PDB configuration for this node pool
+	PodDisruptionBudget *HumioPodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
+
+	HumioNodeSpec `json:"spec,omitempty"`
+}
+
+// HumioPodDisruptionBudgetSpec defines the PDB configuration for a node pool
+type HumioPodDisruptionBudgetSpec struct {
 	// MinAvailable represents the minimum number of pods that should be available for this Humio node pool.
 	// If not set, the operator will not create a PodDisruptionBudget for the node pool.
 	// Can be a percentage or a fixed number.
@@ -323,7 +324,9 @@ type HumioNodePoolSpec struct {
 	// Can be a percentage or a fixed number.
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 
-	HumioNodeSpec `json:"spec,omitempty"`
+	// UnhealthyPodEvictionPolicy defines the policy for evicting unhealthy pods
+	// +kubebuilder:validation:Enum=AlwaysAllow;IfHealthyBudget
+	UnhealthyPodEvictionPolicy *string `json:"unhealthyPodEvictionPolicy,omitempty"`
 }
 
 // HumioHostnameSource is the possible references to a hostname value that is stored outside of the HumioCluster resource
