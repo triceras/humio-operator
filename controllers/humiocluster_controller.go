@@ -2457,6 +2457,9 @@ func (r *HumioClusterReconciler) reconcilePodDisruptionBudgets(ctx context.Conte
 func (r *HumioClusterReconciler) buildNodePoolPDB(ctx context.Context, hc *humiov1alpha1.HumioCluster, nodePool humiov1alpha1.HumioNodePoolSpec) (*policyv1.PodDisruptionBudget, error) {
 	logger := log.FromContext(ctx)
 	pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, nodePool.Name)
+	if nodePool.Name == "" {
+		pdbName = fmt.Sprintf("%s-pdb", hc.Name)
+	}
 
 	// Use PDB-standard selector labels
 	labels := pdbSelectorLabels(hc.Name, nodePool.Name)
