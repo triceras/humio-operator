@@ -882,6 +882,25 @@ func (hnp *HumioNodePool) GetNodePoolFeatureAllowedAPIRequestTypes() []string {
 	return []string{NodePoolFeatureAllowedAPIRequestType}
 }
 
+// GetPodDisruptionBudget returns the PDB configuration for the node pool
+func (hnp *HumioNodePool) GetPodDisruptionBudget(hc *humiov1alpha1.HumioCluster) *humiov1alpha1.HumioPodDisruptionBudgetSpec {
+	// For cluster-level PDB, return default configuration
+	if hnp.nodePoolName == "" {
+		defaultMinAvailable := &intstr.IntOrString{Type: intstr.Int, IntVal: 1}
+		return &humiov1alpha1.HumioPodDisruptionBudgetSpec{
+			MinAvailable: defaultMinAvailable,
+		}
+	}
+
+	// For node pool PDB, get configuration from the node pool spec
+	for _, nodePool := range hc.Spec.NodePools {
+		if nodePool.Name == hnp.nodePoolName {
+			return nodePool.PodDisruptionBudget
+		}
+	}
+	return nil
+}
+
 func viewGroupPermissionsOrDefault(hc *humiov1alpha1.HumioCluster) string {
 	return hc.Spec.ViewGroupPermissions
 }
