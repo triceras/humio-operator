@@ -1332,142 +1332,199 @@ var _ = Describe("HumioCluster Controller", func() {
 		})
 	})
 
-	Context("Humio Cluster PodDisruptionBudgets", func() {
-		var _ = Describe("HumioNodePool with PDBs", func() {
-			var (
-				ctx          context.Context
-				humiocluster *humiov1alpha1.HumioCluster
-				pdb          *policyv1.PodDisruptionBudget
-			)
+	Context("PodDisruptionBudget Creation and Management", func() {
+		var (
+			key      types.NamespacedName
+			toCreate *humiov1alpha1.HumioCluster
+			ctx      context.Context
+		)
 
-			BeforeEach(func() {
-				ctx = context.Background()
-				humiocluster = &humiov1alpha1.HumioCluster{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "humiocluster-pdb-test",
-						Namespace: testProcessNamespace,
-					},
-					Spec: humiov1alpha1.HumioClusterSpec{
-						NodePools: []humiov1alpha1.HumioNodePoolSpec{
-							{
-								Name: "pool1",
-								HumioNodeSpec: humiov1alpha1.HumioNodeSpec{
-									NodeCount: 3,
-								},
-							},
-						},
-					},
+		BeforeEach(func() {
+			minAvailable := intstr.FromInt(1)
+			key = types.NamespacedName{
+				Name:      "humiocluster-pdb-min-available",
+				Namespace: testProcessNamespace,
+			}
+			toCreate = constructBasicMultiNodePoolHumioCluster(key, true, 1)
+			for i := range toCreate.Spec.NodePools {
+				toCreate.Spec.NodePools[i].PodDisruptionBudget = &humiov1alpha1.HumioPodDisruptionBudgetSpec{
+					MinAvailable: &minAvailable,
 				}
-				Expect(k8sClient.Create(ctx, humiocluster)).Should(Succeed())
-			})
+			}
+			ctx = context.Background()
 
-			AfterEach(func() {
-				Expect(k8sClient.Delete(ctx, humiocluster)).Should(Succeed())
-			})
+			suite.UsingClusterBy(key.Name, "Creating the cluster successfully")
+			suite.CreateAndBootstrapCluster(ctx, k8sClient, testHumioClient, toCreate, true, humiov1alpha1.HumioClusterStateRunning, testTimeout)
+		})
 
-			It("should create a PDB with MinAvailable when specified in the NodePool", func() {
-				minAvailable := intstr.FromInt(2)
-				humiocluster.Spec.NodePools[0].PodDisruptionBudget.MinAvailable = &minAvailable
-				Expect(k8sClient.Update(ctx, humiocluster)).Should(Succeed())
+		AfterEach(func() {
+			suite.CleanupCluster(ctx, k8sClient, toCreate)
+		})
 
-				pdb = &policyv1.PodDisruptionBudget{}
+		It("should create PDBs with specified MinAvailable for all NodePools", func() {
+
+			for _, np := range toCreate.Spec.NodePools {
+				pdbName := fmt.Sprintf("%s-%s-pdb", toCreate.Name, np.Name)
+				var pdb policyv1.PodDisruptionBudget
 				Eventually(func() error {
-					return k8sClient.Get(ctx, types.NamespacedName{
-						Name:      fmt.Sprintf("%s-%s-pdb", humiocluster.Name, humiocluster.Spec.NodePools[0].Name),
-						Namespace: humiocluster.Namespace,
-					}, pdb)
+					err := k8sClient.Get(ctx, types.NamespacedName{
+						Name:      pdbName,
+						Namespace: toCreate.Namespace,
+					}, &pdb)
+					if err != nil {
+						return err
+					}
+					Expect(pdb.Spec.MinAvailable.IntVal).To(BeEquivalentTo(1))
+					Expect(pdb.Spec.MaxUnavailable).To(BeNil())
+					return nil
 				}, testTimeout, suite.TestInterval).Should(Succeed())
 
-				Expect(pdb.Spec.MinAvailable).To(Equal(&minAvailable))
+				Expect(pdb.Spec.MinAvailable.IntVal).To(BeEquivalentTo(1))
 				Expect(pdb.Spec.MaxUnavailable).To(BeNil())
-				expectedLabels := kubernetes.MatchingLabelsForHumio(humiocluster.Name)
-				expectedLabels[kubernetes.NodePoolLabelName] = humiocluster.Spec.NodePools[0].Name
+
+				expectedLabels := kubernetes.MatchingLabelsForHumio(toCreate.Name)
+				expectedLabels[kubernetes.NodePoolLabelName] = np.Name
 				Expect(pdb.Spec.Selector.MatchLabels).To(Equal(expectedLabels))
-			})
+			}
+		})
 
-			It("should create a PDB with MaxUnavailable when specified in the NodePool", func() {
-				maxUnavailable := intstr.FromString("50%")
-				humiocluster.Spec.NodePools[0].PodDisruptionBudget.MaxUnavailable = &maxUnavailable
-				Expect(k8sClient.Update(ctx, humiocluster)).Should(Succeed())
+		It("should create PDBs with specified MaxUnavailable when defined in NodePools", func() {
+			maxUnavailable := intstr.FromString("50%")
+			for i := range toCreate.Spec.NodePools {
+				toCreate.Spec.NodePools[i].PodDisruptionBudget = &humiov1alpha1.HumioPodDisruptionBudgetSpec{
+					MaxUnavailable: &maxUnavailable,
+				}
+			}
+			Expect(k8sClient.Update(ctx, toCreate)).Should(Succeed())
 
-				pdb = &policyv1.PodDisruptionBudget{}
+			for _, np := range toCreate.Spec.NodePools {
+				pdbName := fmt.Sprintf("%s-%s-pdb", toCreate.Name, np.Name)
+				pdb := &policyv1.PodDisruptionBudget{}
 				Eventually(func() error {
 					return k8sClient.Get(ctx, types.NamespacedName{
-						Name:      fmt.Sprintf("%s-%s-pdb", humiocluster.Name, humiocluster.Spec.NodePools[0].Name),
-						Namespace: humiocluster.Namespace,
+						Name:      pdbName,
+						Namespace: toCreate.Namespace,
 					}, pdb)
 				}, testTimeout, suite.TestInterval).Should(Succeed())
 
 				Expect(pdb.Spec.MinAvailable).To(BeNil())
 				Expect(pdb.Spec.MaxUnavailable).To(Equal(&maxUnavailable))
-				expectedLabels := kubernetes.MatchingLabelsForHumio(humiocluster.Name)
-				expectedLabels[kubernetes.NodePoolLabelName] = humiocluster.Spec.NodePools[0].Name
+
+				expectedLabels := kubernetes.MatchingLabelsForHumio(toCreate.Name)
+				expectedLabels[kubernetes.NodePoolLabelName] = np.Name
 				Expect(pdb.Spec.Selector.MatchLabels).To(Equal(expectedLabels))
-			})
+			}
+		})
 
-			It("should update the PDB when the NodePool spec is updated", func() {
-				minAvailable := intstr.FromInt(1)
-				humiocluster.Spec.NodePools[0].PodDisruptionBudget.MinAvailable = &minAvailable
-				Expect(k8sClient.Update(ctx, humiocluster)).Should(Succeed())
+		It("should update PDBs when NodePool specs are updated", func() {
+			// Initial Setup: Set MinAvailable
+			minAvailable := intstr.FromInt(1)
+			for i := range toCreate.Spec.NodePools {
+				toCreate.Spec.NodePools[i].PodDisruptionBudget = &humiov1alpha1.HumioPodDisruptionBudgetSpec{
+					MinAvailable: &minAvailable,
+				}
+			}
+			Expect(k8sClient.Update(ctx, toCreate)).Should(Succeed())
 
-				pdb = &policyv1.PodDisruptionBudget{}
+			// Verify initial PDBs
+			for _, np := range toCreate.Spec.NodePools {
+				pdbName := fmt.Sprintf("%s-%s-pdb", toCreate.Name, np.Name)
+				pdb := &policyv1.PodDisruptionBudget{}
 				Eventually(func() error {
 					return k8sClient.Get(ctx, types.NamespacedName{
-						Name:      fmt.Sprintf("%s-%s-pdb", humiocluster.Name, humiocluster.Spec.NodePools[0].Name),
-						Namespace: humiocluster.Namespace,
+						Name:      pdbName,
+						Namespace: toCreate.Namespace,
 					}, pdb)
 				}, testTimeout, suite.TestInterval).Should(Succeed())
 
-				maxUnavailable := intstr.FromString("25%")
-				humiocluster.Spec.NodePools[0].PodDisruptionBudget.MaxUnavailable = &maxUnavailable
-				Expect(k8sClient.Update(ctx, humiocluster)).Should(Succeed())
+				Expect(pdb.Spec.MinAvailable.IntVal).To(BeEquivalentTo(1))
+				Expect(pdb.Spec.MaxUnavailable).To(BeNil())
+			}
 
+			// Update to MaxUnavailable
+			maxUnavailable := intstr.FromString("25%")
+			for i := range toCreate.Spec.NodePools {
+				toCreate.Spec.NodePools[i].PodDisruptionBudget.MaxUnavailable = &maxUnavailable
+				toCreate.Spec.NodePools[i].PodDisruptionBudget.MinAvailable = nil
+			}
+			Expect(k8sClient.Update(ctx, toCreate)).Should(Succeed())
+
+			// Verify updated PDBs
+			for _, np := range toCreate.Spec.NodePools {
+				pdbName := fmt.Sprintf("%s-%s-pdb", toCreate.Name, np.Name)
+				//pdb := &policyv1.PodDisruptionBudget{}
 				Eventually(func() *intstr.IntOrString {
 					updatedPDB := &policyv1.PodDisruptionBudget{}
 					err := k8sClient.Get(ctx, types.NamespacedName{
-						Name:      fmt.Sprintf("%s-%s-pdb", humiocluster.Name, humiocluster.Spec.NodePools[0].Name),
-						Namespace: humiocluster.Namespace,
+						Name:      pdbName,
+						Namespace: toCreate.Namespace,
 					}, updatedPDB)
 					if err != nil {
 						return nil
 					}
 					return updatedPDB.Spec.MaxUnavailable
-				}, testTimeout, suite.TestInterval).Should(Equal(&maxUnavailable))
-			})
+				}, testTimeout, suite.TestInterval).Should(Equal(np.PodDisruptionBudget.MaxUnavailable))
+			}
+		})
 
-			It("should not create a PDB if not specified in the NodePool spec", func() {
-				pdb = &policyv1.PodDisruptionBudget{}
+		It("should not create PDBs if not specified in the NodePool spec", func() {
+			// Ensure PDBs are not created by removing PodDisruptionBudget specs
+			for i := range toCreate.Spec.NodePools {
+				toCreate.Spec.NodePools[i].PodDisruptionBudget = nil
+			}
+			Expect(k8sClient.Update(ctx, toCreate)).Should(Succeed())
+
+			for _, np := range toCreate.Spec.NodePools {
+				pdbName := fmt.Sprintf("%s-%s-pdb", toCreate.Name, np.Name)
+				pdb := &policyv1.PodDisruptionBudget{}
 				Consistently(func() error {
 					return k8sClient.Get(ctx, types.NamespacedName{
-						Name:      fmt.Sprintf("%s-%s-pdb", humiocluster.Name, humiocluster.Spec.NodePools[0].Name),
-						Namespace: humiocluster.Namespace,
+						Name:      pdbName,
+						Namespace: toCreate.Namespace,
 					}, pdb)
 				}, testTimeout, suite.TestInterval).Should(HaveOccurred())
-			})
+			}
+		})
 
-			It("should delete the PDB if it's removed from the NodePool spec", func() {
-				minAvailable := intstr.FromInt(1)
-				humiocluster.Spec.NodePools[0].PodDisruptionBudget.MinAvailable = &minAvailable
-				Expect(k8sClient.Update(ctx, humiocluster)).Should(Succeed())
+		It("should delete PDBs if they are removed from the NodePool spec", func() {
+			// Initial Setup: Set MinAvailable
+			minAvailable := intstr.FromInt(1)
+			for i := range toCreate.Spec.NodePools {
+				toCreate.Spec.NodePools[i].PodDisruptionBudget = &humiov1alpha1.HumioPodDisruptionBudgetSpec{
+					MinAvailable: &minAvailable,
+				}
+			}
+			Expect(k8sClient.Update(ctx, toCreate)).Should(Succeed())
 
-				pdb = &policyv1.PodDisruptionBudget{}
+			// Verify initial PDBs
+			for _, np := range toCreate.Spec.NodePools {
+				pdbName := fmt.Sprintf("%s-%s-pdb", toCreate.Name, np.Name)
+				pdb := &policyv1.PodDisruptionBudget{}
 				Eventually(func() error {
 					return k8sClient.Get(ctx, types.NamespacedName{
-						Name:      fmt.Sprintf("%s-%s-pdb", humiocluster.Name, humiocluster.Spec.NodePools[0].Name),
-						Namespace: humiocluster.Namespace,
+						Name:      pdbName,
+						Namespace: toCreate.Namespace,
 					}, pdb)
 				}, testTimeout, suite.TestInterval).Should(Succeed())
+			}
 
-				humiocluster.Spec.NodePools[0].PodDisruptionBudget = nil
-				Expect(k8sClient.Update(ctx, humiocluster)).Should(Succeed())
+			// Remove PodDisruptionBudget specs
+			for i := range toCreate.Spec.NodePools {
+				toCreate.Spec.NodePools[i].PodDisruptionBudget = nil
+			}
+			Expect(k8sClient.Update(ctx, toCreate)).Should(Succeed())
 
+			// Verify PDBs are deleted
+			for _, np := range toCreate.Spec.NodePools {
+				pdbName := fmt.Sprintf("%s-%s-pdb", toCreate.Name, np.Name)
+				pdb := &policyv1.PodDisruptionBudget{}
 				Eventually(func() error {
 					return k8sClient.Get(ctx, types.NamespacedName{
-						Name:      fmt.Sprintf("%s-%s-pdb", humiocluster.Name, humiocluster.Spec.NodePools[0].Name),
-						Namespace: humiocluster.Namespace,
+						Name:      pdbName,
+						Namespace: toCreate.Namespace,
 					}, pdb)
 				}, testTimeout, suite.TestInterval).Should(HaveOccurred())
-			})
+			}
 		})
 	})
 
@@ -6257,8 +6314,6 @@ func monitorMaxUnavailableWithoutZoneAwareness(ctx context.Context, k8sClient cl
 }
 
 // TODO: Consider refactoring goroutine to a "watcher". https://book-v1.book.kubebuilder.io/beyond_basics/controller_watches
-//
-//	Using a for-loop will only see snapshots in time and we could easily miss a point in time where multiple node pools have the node pool state we are filtering for
 func monitorMaxNumberNodePoolsWithSpecificNodePoolStatus(ctx context.Context, k8sClient client.Client, key types.NamespacedName, forever chan struct{}, mostNumNodePoolsWithSpecificNodePoolStatus *int, nodePoolState string) {
 	updatedHumioCluster := humiov1alpha1.HumioCluster{}
 
