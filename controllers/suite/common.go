@@ -434,11 +434,44 @@ func CreateAndBootstrapCluster(ctx context.Context, k8sClient client.Client, hum
 	}, testTimeout, TestInterval).Should(BeIdenticalTo(humiov1alpha1.HumioClusterStateRunning))
 
 	UsingClusterBy(key.Name, "Waiting to have the correct number of pods")
-
 	Eventually(func() []corev1.Pod {
-		var clusterPods []corev1.Pod
-		clusterPods, _ = kubernetes.ListPods(ctx, k8sClient, key.Namespace, controllers.NewHumioNodeManagerFromHumioCluster(&updatedHumioCluster).GetPodLabels())
-		_ = MarkPodsAsRunningIfUsingEnvtest(ctx, k8sClient, clusterPods, key.Name)
+		updatedHumioCluster := &humiov1alpha1.HumioCluster{}
+		err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updatedHumioCluster)
+		Expect(err).NotTo(HaveOccurred())
+
+		if updatedHumioCluster.Status.State != humiov1alpha1.HumioClusterStateRunning {
+			UsingClusterBy(key.Name, fmt.Sprintf("Waiting for Humio cluster to be running before checking for pods. State is %s", updatedHumioCluster.Status.State))
+			return []corev1.Pod{}
+		}
+
+		UsingClusterBy(key.Name, fmt.Sprintf("Humio cluster is running, found state: %v", updatedHumioCluster.Status.State))
+
+		clusterPods, err := kubernetes.ListPods(ctx, k8sClient, key.Namespace, controllers.NewHumioNodeManagerFromHumioCluster(updatedHumioCluster).GetPodLabels())
+		if err != nil {
+			UsingClusterBy(key.Name, fmt.Sprintf("Error listing pods: %v", err))
+			return []corev1.Pod{}
+		}
+
+		// Check if the number of pods is correct.
+		if len(clusterPods) != updatedHumioCluster.Spec.NodeCount {
+			UsingClusterBy(key.Name, fmt.Sprintf("Waiting for correct number of pods. Expected %d, got %d", updatedHumioCluster.Spec.NodeCount, len(clusterPods)))
+
+			// ADDED: Log the status of each pod
+			for _, pod := range clusterPods {
+				UsingClusterBy(key.Name, fmt.Sprintf("Pod %s status: %s", pod.Name, pod.Status.Phase))
+				for _, containerStatus := range pod.Status.ContainerStatuses {
+					UsingClusterBy(key.Name, fmt.Sprintf("  Container %s ready: %t", containerStatus.Name, containerStatus.Ready))
+				}
+			}
+			return []corev1.Pod{}
+		}
+
+		UsingClusterBy(key.Name, fmt.Sprintf("Marking pods as running if using envtest, found %d pods", len(clusterPods)))
+		if err = MarkPodsAsRunningIfUsingEnvtest(ctx, k8sClient, clusterPods, key.Name); err != nil {
+			UsingClusterBy(key.Name, fmt.Sprintf("Error marking pods as running: %v", err))
+			return []corev1.Pod{}
+		}
+
 		return clusterPods
 	}, testTimeout, TestInterval).Should(HaveLen(cluster.Spec.NodeCount))
 
