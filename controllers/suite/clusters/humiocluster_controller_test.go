@@ -18,6 +18,7 @@ package clusters
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -35,7 +36,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	policyv1 "k8s.io/api/policy/v1beta1"
+	policyv1 "k8s.io/api/policy/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -6277,6 +6278,86 @@ var _ = Describe("HumioCluster Controller", func() {
 			}, &pdb)
 			return k8serrors.IsNotFound(err)
 		}, testTimeout, suite.TestInterval).Should(BeTrue())
+
+		suite.UsingClusterBy(key.Name, "Verifying PDB is created with MinAvailable and status is updated")
+		Eventually(func() error {
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      fmt.Sprintf("%s-pdb", toCreate.Name),
+				Namespace: toCreate.Namespace,
+			}, &pdb)
+			if err != nil {
+				return err
+			}
+			Expect(pdb.Spec.MinAvailable).To(Equal(&minAvailable))
+			Expect(pdb.Spec.MaxUnavailable).To(BeNil())
+
+			// Assert PDB status fields
+			Expect(pdb.Status.DesiredHealthy).To(BeEquivalentTo(toCreate.Spec.NodeCount))
+			Expect(pdb.Status.CurrentHealthy).To(BeEquivalentTo(toCreate.Spec.NodeCount))
+			Expect(pdb.Status.DisruptionsAllowed).To(BeEquivalentTo(toCreate.Spec.NodeCount - int(pdb.Spec.MinAvailable.IntVal)))
+
+			return nil
+		}, testTimeout, suite.TestInterval).Should(Succeed())
+	})
+	It("Should enforce MinAvailable PDB rule during pod deletion", Label("envtest", "pdb"), func() {
+		key := types.NamespacedName{
+			Name:      "humiocluster-pdb-enforce",
+			Namespace: testProcessNamespace,
+		}
+		toCreate := suite.ConstructBasicSingleNodeHumioCluster(key, true)
+		toCreate.Spec.NodeCount = 3
+		minAvailable := intstr.FromInt(2)
+		toCreate.Spec.PodDisruptionBudget = &humiov1alpha1.HumioPodDisruptionBudgetSpec{
+			MinAvailable: &minAvailable,
+		}
+
+		suite.UsingClusterBy(key.Name, "Creating cluster with PDB")
+		ctx := context.Background()
+		suite.CreateAndBootstrapCluster(ctx, k8sClient, testHumioClient, toCreate, true, humiov1alpha1.HumioClusterStateRunning, testTimeout)
+		defer suite.CleanupCluster(ctx, k8sClient, toCreate)
+
+		pdbName := fmt.Sprintf("%s-pdb", toCreate.Name)
+		pdb := &policyv1.PodDisruptionBudget{}
+
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: key.Namespace}, pdb)
+		}, testTimeout, suite.TestInterval).Should(Succeed())
+
+		initialPods := &corev1.PodList{}
+		Expect(k8sClient.List(ctx, initialPods, &client.ListOptions{Namespace: key.Namespace, LabelSelector: labels.SelectorFromSet(kubernetes.LabelsForHumio(toCreate.Name))})).To(Succeed())
+		Expect(initialPods.Items).To(HaveLen(3))
+
+		podToDelete := &initialPods.Items[0]
+		Expect(k8sClient.Delete(ctx, podToDelete)).To(Succeed())
+
+		Eventually(func() int {
+			currentPods := &corev1.PodList{}
+			Expect(k8sClient.List(ctx, currentPods, &client.ListOptions{Namespace: key.Namespace, LabelSelector: labels.SelectorFromSet(kubernetes.LabelsForHumio(toCreate.Name))})).To(Succeed())
+			return len(currentPods.Items)
+		}, testTimeout, suite.TestInterval).Should(Equal(2)) // 2 pods remaining
+
+		podsToDelete := &corev1.PodList{}
+		Expect(k8sClient.List(ctx, podsToDelete, &client.ListOptions{Namespace: key.Namespace, LabelSelector: labels.SelectorFromSet(kubernetes.LabelsForHumio(toCreate.Name))})).To(Succeed())
+		podToDelete2 := &podsToDelete.Items[0]
+
+		deleteErr := k8sClient.Delete(ctx, podToDelete2)
+		Expect(deleteErr).To(HaveOccurred()) // Deletion should be prevented by PDB
+
+		var statusErr *k8serrors.StatusError
+		Expect(errors.As(deleteErr, &statusErr)).To(BeTrue(), "error should be a StatusError")
+		Expect(statusErr.ErrStatus.Reason).To(Equal(metav1.StatusReasonForbidden), "deletion should be rejected due to PDB")
+		Expect(statusErr.ErrStatus.Message).To(ContainSubstring("violates PodDisruptionBudget"))
+
+		suite.UsingClusterBy(key.Name, "Scaling down the cluster node count successfully")
+		Eventually(func() error {
+			updatedHumioCluster := humiov1alpha1.HumioCluster{}
+			err := k8sClient.Get(ctx, key, &updatedHumioCluster)
+			if err != nil {
+				return err
+			}
+			updatedHumioCluster.Spec.NodeCount = 1
+			return k8sClient.Update(ctx, &updatedHumioCluster)
+		}, testTimeout, suite.TestInterval).Should(Succeed())
 	})
 })
 
