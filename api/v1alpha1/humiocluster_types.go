@@ -62,6 +62,7 @@ type HumioClusterSpec struct {
 	// DigestPartitionsCount is the desired number of digest partitions
 	DigestPartitionsCount int `json:"digestPartitionsCount,omitempty"`
 	// License is the kubernetes secret reference which contains the Humio license
+	//+required
 	License HumioClusterLicenseSpec `json:"license,omitempty"`
 	// IdpCertificateSecretName is the name of the secret that contains the IDP Certificate when using SAML authentication
 	IdpCertificateSecretName string `json:"idpCertificateSecretName,omitempty"`
@@ -125,6 +126,7 @@ type HumioNodeSpec struct {
 
 	// DisableInitContainer is used to disable the init container completely which collects the availability zone from the Kubernetes worker node.
 	// This is not recommended, unless you are using auto rebalancing partitions and are running in a single availability zone.
+	//+kubebuilder:default=false
 	DisableInitContainer bool `json:"disableInitContainer,omitempty"`
 
 	// EnvironmentVariablesSource is the reference to an external source of environment variables that will be merged with environmentVariables
@@ -253,10 +255,14 @@ type HumioNodeSpec struct {
 	UpdateStrategy *HumioUpdateStrategy `json:"updateStrategy,omitempty"`
 
 	// PriorityClassName is the name of the priority class that will be used by the Humio pods
+	//+kubebuilder:default=""
 	PriorityClassName string `json:"priorityClassName,omitempty"`
 
 	// HumioNodePoolFeatures defines the features that are allowed by the node pool
 	NodePoolFeatures HumioNodePoolFeatures `json:"nodePoolFeatures,omitempty"`
+
+	// PodDisruptionBudget defines the PDB configuration for this node spec
+	PodDisruptionBudget *HumioPodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
 }
 
 type HumioNodePoolFeatures struct {
@@ -295,7 +301,7 @@ type HumioUpdateStrategy struct {
 
 	// MaxUnavailable is the maximum number of pods that can be unavailable during a rolling update.
 	// This can be configured to an absolute number or a percentage, e.g. "maxUnavailable: 5" or "maxUnavailable: 25%".
-	// By default, the max unavailable pods is 1.
+	//+kubebuilder:default=1
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 type HumioNodePoolSpec struct {
@@ -303,27 +309,32 @@ type HumioNodePoolSpec struct {
 	//+required
 	Name string `json:"name"`
 
-	// PodDisruptionBudget defines the PDB configuration for this node pool
-	PodDisruptionBudget *HumioPodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
-
 	HumioNodeSpec `json:"spec,omitempty"`
 }
 
-// HumioPodDisruptionBudgetSpec defines the PDB configuration for a node pool
+// PodDisruptionBudgetSpec defines the desired pod disruption budget configuration
 type HumioPodDisruptionBudgetSpec struct {
-	// MinAvailable represents the minimum number of pods that should be available for this Humio node pool.
-	// If not set, the operator will not create a PodDisruptionBudget for the node pool.
-	// Can be a percentage or a fixed number.
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=int-or-string
+	// +kubebuilder:validation:Immutable
+	// MinAvailable is the minimum number of pods that must be available during a disruption.
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
 
-	// MaxUnavailable represents the maximum number of pods that can be unavailable for this Humio node pool
-	// If not set, the operator will not use a MaxUnavailable value for the node pool's PodDisruptionBudget.
-	// Can be a percentage or a fixed number.
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=int-or-string
+	// +kubebuilder:validation:Immutable
+	// MaxUnavailable is the maximum number of pods that can be unavailable during a disruption.
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 
-	// UnhealthyPodEvictionPolicy defines the policy for evicting unhealthy pods
-	// +kubebuilder:validation:Enum=AlwaysAllow;IfHealthyBudget
+	// +kubebuilder:validation:Enum=IfHealthyBudget;AlwaysAllow
+	// +kubebuilder:default="IfHealthyBudget"
+	// UnhealthyPodEvictionPolicy defines the policy for evicting unhealthy pods.
+	// Requires Kubernetes 1.26+.
+	// +optional
 	UnhealthyPodEvictionPolicy *string `json:"unhealthyPodEvictionPolicy,omitempty"`
+
+	// +kubebuilder:validation:Xor={"minAvailable","maxUnavailable"}
+	// +kubebuilder:validation:Required
 }
 
 // HumioHostnameSource is the possible references to a hostname value that is stored outside of the HumioCluster resource
@@ -342,6 +353,7 @@ type HumioESHostnameSource struct {
 type HumioClusterIngressSpec struct {
 	// Enabled enables the logic for the Humio operator to create ingress-related objects. Requires one of the following
 	// to be set: spec.hostname, spec.hostnameSource, spec.esHostname or spec.esHostnameSource
+	//+kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 	// Controller is used to specify the controller used for ingress in the Kubernetes cluster. For now, only nginx is supported.
 	Controller string `json:"controller,omitempty"`
