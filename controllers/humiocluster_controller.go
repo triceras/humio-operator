@@ -2381,18 +2381,20 @@ func (r *HumioClusterReconciler) reconcileSinglePDB(ctx context.Context, hc *hum
 		return nil
 	}
 
-	desiredPDB, err := r.constructPDB(hc, hnp, pdbSpec) // Modified to take HumioNodePool and PDBSpec
+	desiredPDB, err := r.constructPDB(hc, hnp, pdbSpec)
 	if err != nil {
+		r.Log.Error(err, "failed to construct PDB", "pdbName", hnp.GetPodDisruptionBudgetName(), "namespace", hnp.GetNamespace())
 		return fmt.Errorf("failed to construct PDB: %w", err)
 	}
 
-	return r.createOrUpdatePDB(ctx, hc, hnp, desiredPDB) // Modified to take HumioNodePool
+	return r.createOrUpdatePDB(ctx, hc, hnp, desiredPDB)
 }
 
 const (
 	HumioProtectionFinalizer = "humio.com/pdb-protection"
 )
 
+// constructPDB creates a PodDisruptionBudget object for a given HumioCluster and HumioNodePool
 func (r *HumioClusterReconciler) constructPDB(hc *humiov1alpha1.HumioCluster, hnp *HumioNodePool, pdbSpec *humiov1alpha1.HumioPodDisruptionBudgetSpec) (*policyv1.PodDisruptionBudget, error) {
 	pdbName := hnp.GetPodDisruptionBudgetName() // Use GetPodDisruptionBudgetName from HumioNodePool
 	// Create and populate labels map
@@ -2432,28 +2434,39 @@ func (r *HumioClusterReconciler) constructPDB(hc *humiov1alpha1.HumioCluster, hn
 	return pdb, nil
 }
 
+// createOrUpdatePDB creates or updates a PodDisruptionBudget object
 func (r *HumioClusterReconciler) createOrUpdatePDB(ctx context.Context, hc *humiov1alpha1.HumioCluster, hnp *HumioNodePool, desiredPDB *policyv1.PodDisruptionBudget) error {
 	currentPDB := &policyv1.PodDisruptionBudget{}
 	pdbName := hnp.GetPodDisruptionBudgetName()
 	err := r.Get(ctx, client.ObjectKey{Name: pdbName, Namespace: hc.Namespace}, currentPDB)
 	if err != nil && k8serrors.IsNotFound(err) {
 		r.Log.Info("creating PDB", "pdb", pdbName)
-		return r.Create(ctx, desiredPDB)
+		err = r.Create(ctx, desiredPDB)
+		if err != nil {
+			r.Log.Error(err, "failed to create PDB", "pdbName", desiredPDB.Name, "pdbNamespace", desiredPDB.Namespace)
+			return fmt.Errorf("failed to create PDB %s/%s: %w", desiredPDB.Namespace, desiredPDB.Name, err)
+		}
+		return nil
 	} else if err != nil {
 		return fmt.Errorf("failed to get PDB: %w", err)
 	}
 
-	if !SemanticPDBsEqual(desiredPDB, currentPDB) { // Implement SemanticPDBsEqual
+	if !SemanticPDBsEqual(desiredPDB, currentPDB) {
 		r.Log.Info("updating PDB", "pdb", pdbName)
 		updatedPDB := currentPDB.DeepCopy()
-		updatedPDB.Spec = desiredPDB.Spec // Update only spec for now, adjust as needed
-		return r.Update(ctx, updatedPDB)
+		updatedPDB.Spec = desiredPDB.Spec
+		err = r.Update(ctx, updatedPDB)
+		if err != nil {
+			r.Log.Error(err, "failed to update PDB", "pdbName", desiredPDB.Name, "pdbNamespace", desiredPDB.Namespace)
+			return fmt.Errorf("could not update PDB %s/%s: %w", desiredPDB.Namespace, desiredPDB.Name, err) // Return Result{}, error on failure
+		}
 	}
 
 	r.Log.V(1).Info("pdb is up-to-date", "pdb", pdbName)
 	return nil
 }
 
+// SemanticPDBsEqual compares two PodDisruptionBudgets and returns true if they are equal
 func SemanticPDBsEqual(desired *policyv1.PodDisruptionBudget, current *policyv1.PodDisruptionBudget) bool {
 	if !equality.Semantic.DeepEqual(desired.Spec.MinAvailable, current.Spec.MinAvailable) {
 		return false
@@ -2467,7 +2480,7 @@ func SemanticPDBsEqual(desired *policyv1.PodDisruptionBudget, current *policyv1.
 	return true
 }
 
-// cleanupOrphanedPDBs removes PDBs that don't correspond to node pools
+// cleanupOrphanedPDBs deletes PodDisruptionBudgets that are orphaned
 func (r *HumioClusterReconciler) cleanupOrphanedPDBs(ctx context.Context, hc *humiov1alpha1.HumioCluster, humioNodePools *HumioNodePoolList) error {
 	// Get all valid node pool names
 	validNodePools := make(map[string]struct{})
@@ -2496,11 +2509,13 @@ func (r *HumioClusterReconciler) cleanupOrphanedPDBs(ctx context.Context, hc *hu
 	return nil
 }
 
+// isValidNodePool checks if a node pool name is valid
 func isValidNodePool(name string, validPools map[string]struct{}) bool {
 	_, exists := validPools[name]
 	return exists
 }
 
+// isOwnedByCluster checks if a PodDisruptionBudget is owned by a HumioCluster
 func isOwnedByCluster(pdb *policyv1.PodDisruptionBudget, hc *humiov1alpha1.HumioCluster) bool {
 	for _, ownerRef := range pdb.OwnerReferences {
 		if ownerRef.UID == hc.UID && ownerRef.Kind == "HumioCluster" {
@@ -2510,6 +2525,7 @@ func isOwnedByCluster(pdb *policyv1.PodDisruptionBudget, hc *humiov1alpha1.Humio
 	return false
 }
 
+// handlePDBFinalizers removes finalizers from PodDisruptionBudgets
 func (r *HumioClusterReconciler) handlePDBFinalizers(ctx context.Context, hc *humiov1alpha1.HumioCluster) error {
 	pdbs := &policyv1.PodDisruptionBudgetList{}
 	if err := r.List(ctx, pdbs, client.MatchingLabels(kubernetes.MatchingLabelsForHumio(hc.Name))); err != nil {
