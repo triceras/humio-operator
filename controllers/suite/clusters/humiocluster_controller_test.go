@@ -6299,77 +6299,75 @@ var _ = Describe("HumioCluster Controller", func() {
 			return nil
 		}, testTimeout, suite.TestInterval).Should(Succeed())
 	})
-	It("Should enforce MinAvailable PDB rule during pod deletion", Label("envtest", "pdb"), func() {
+	It("Should enforce MinAvailable PDB rule during pod deletion", func() {
 		key := types.NamespacedName{
 			Name:      "humiocluster-pdb-enforce",
 			Namespace: testProcessNamespace,
 		}
 		toCreate := suite.ConstructBasicSingleNodeHumioCluster(key, true)
-		toCreate.Spec.NodeCount = 0 // Set HumioCluster level NodeCount to 0 as we are using NodePools
-
-		minAvailable := intstr.FromInt(2)
-		toCreate.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{ // Define NodePools
-			{
-				Name: "core", // Name of the node pool
-				HumioNodeSpec: humiov1alpha1.HumioNodeSpec{
-					NodeCount: 3, // NodeCount for this specific node pool
-					PodDisruptionBudget: &humiov1alpha1.HumioPodDisruptionBudgetSpec{ // Define PDB within NodePoolSpec
-						Enabled:      true, // **Important: Enable PDB**
-						MinAvailable: &minAvailable,
-					},
-				},
-			},
+		toCreate.Spec.NodeCount = 3
+		toCreate.Spec.PodDisruptionBudget = &humiov1alpha1.HumioPodDisruptionBudgetSpec{
+			MinAvailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2},
 		}
 
-		suite.UsingClusterBy(key.Name, "Creating cluster with PDB in NodePool")
+		suite.UsingClusterBy(key.Name, "Creating the cluster successfully with PDB spec")
 		ctx := context.Background()
 		suite.CreateAndBootstrapCluster(ctx, k8sClient, testHumioClient, toCreate, true, humiov1alpha1.HumioClusterStateRunning, testTimeout)
 		defer suite.CleanupCluster(ctx, k8sClient, toCreate)
 
-		pdbName := fmt.Sprintf("%s-core-pdb", toCreate.Name) // PDB name should now include node pool name
-		pdb := &policyv1.PodDisruptionBudget{}
-
+		suite.UsingClusterBy(key.Name, "Verifying PDB exists")
+		var pdb policyv1.PodDisruptionBudget
 		Eventually(func() error {
-			return k8sClient.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: key.Namespace}, pdb)
+			return k8sClient.Get(ctx, types.NamespacedName{
+				Name:      fmt.Sprintf("%s-pdb", toCreate.Name),
+				Namespace: key.Namespace,
+			}, &pdb)
 		}, testTimeout, suite.TestInterval).Should(Succeed())
 
-		initialPods := &corev1.PodList{}
-		Expect(k8sClient.List(ctx, initialPods, &client.ListOptions{Namespace: key.Namespace, LabelSelector: labels.SelectorFromSet(kubernetes.LabelsForHumio(toCreate.Name))})).To(Succeed())
-		Expect(initialPods.Items).To(HaveLen(3))
+		suite.UsingClusterBy(key.Name, "Verifying initial pod count")
+		var pods []corev1.Pod
+		hnp := controllers.NewHumioNodeManagerFromHumioCluster(toCreate)
+		Eventually(func() int {
+			clusterPods, err := kubernetes.ListPods(ctx, k8sClient, key.Namespace, hnp.GetPodLabels())
+			if err != nil {
+				return 0
+			}
+			pods = clusterPods
+			return len(clusterPods)
+		}, testTimeout, suite.TestInterval).Should(Equal(3))
 
-		podToDelete := &initialPods.Items[0]
+		suite.UsingClusterBy(key.Name, "Marking pods as Ready")
+		for _, pod := range pods {
+			suite.MarkPodAsRunningIfUsingEnvtest(ctx, k8sClient, pod, key.Name)
+		}
+
+		suite.UsingClusterBy(key.Name, "Attempting to delete a pod")
+		podToDelete := &pods[0]
 		Expect(k8sClient.Delete(ctx, podToDelete)).To(Succeed())
 
+		suite.UsingClusterBy(key.Name, "Verifying pod count after deletion")
 		Eventually(func() int {
-			currentPods := &corev1.PodList{}
-			Expect(k8sClient.List(ctx, currentPods, &client.ListOptions{Namespace: key.Namespace, LabelSelector: labels.SelectorFromSet(kubernetes.LabelsForHumio(toCreate.Name))})).To(Succeed())
-			return len(currentPods.Items)
-		}, testTimeout, suite.TestInterval).Should(Equal(2)) // 2 pods remaining
+			clusterPods, err := kubernetes.ListPods(ctx, k8sClient, key.Namespace, hnp.GetPodLabels())
+			if err != nil {
+				return 0
+			}
+			return len(clusterPods)
+		}, testTimeout, suite.TestInterval).Should(Equal(2))
 
-		podsToDelete := &corev1.PodList{}
-		Expect(k8sClient.List(ctx, podsToDelete, &client.ListOptions{Namespace: key.Namespace, LabelSelector: labels.SelectorFromSet(kubernetes.LabelsForHumio(toCreate.Name))})).To(Succeed())
-		podToDelete2 := &podsToDelete.Items[0]
+		suite.UsingClusterBy(key.Name, "Attempting to delete another pod")
+		clusterPods, err := kubernetes.ListPods(ctx, k8sClient, key.Namespace, hnp.GetPodLabels())
+		Expect(err).NotTo(HaveOccurred())
 
-		deleteErr := k8sClient.Delete(ctx, podToDelete2)
-		Expect(deleteErr).To(HaveOccurred()) // Deletion should be prevented by PDB
+		podToDelete = &clusterPods[0]
+		err = k8sClient.Delete(ctx, podToDelete)
+		Expect(err).To(HaveOccurred())
 
 		var statusErr *k8serrors.StatusError
-		Expect(errors.As(deleteErr, &statusErr)).To(BeTrue(), "error should be a StatusError")
-		Expect(statusErr.ErrStatus.Reason).To(Equal(metav1.StatusReasonForbidden), "deletion should be rejected due to PDB")
+		Expect(errors.As(err, &statusErr)).To(BeTrue())
+		Expect(statusErr.ErrStatus.Reason).To(Equal(metav1.StatusReasonForbidden))
 		Expect(statusErr.ErrStatus.Message).To(ContainSubstring("violates PodDisruptionBudget"))
-
-		suite.UsingClusterBy(key.Name, "Scaling down the cluster node count successfully")
-		Eventually(func() error {
-			updatedHumioCluster := humiov1alpha1.HumioCluster{}
-			err := k8sClient.Get(ctx, key, &updatedHumioCluster)
-			if err != nil {
-				return err
-			}
-			// Scale down the node pool's NodeCount, not HumioCluster.Spec.NodeCount
-			updatedHumioCluster.Spec.NodePools[0].NodeCount = 1
-			return k8sClient.Update(ctx, &updatedHumioCluster)
-		}, testTimeout, suite.TestInterval).Should(Succeed())
 	})
+
 })
 
 // TODO: Consider refactoring goroutine to a "watcher". https://book-v1.book.kubebuilder.io/beyond_basics/controller_watches

@@ -3576,6 +3576,7 @@ spec:
                   partitions
                 type: integer
               disableInitContainer:
+                default: false
                 description: |-
                   DisableInitContainer is used to disable the init container completely which collects the availability zone from the Kubernetes worker node.
                   This is not recommended, unless you are using auto rebalancing partitions and are running in a single availability zone.
@@ -5664,6 +5665,7 @@ spec:
                       supported.
                     type: string
                   enabled:
+                    default: false
                     description: |-
                       Enabled enables the logic for the Humio operator to create ingress-related objects. Requires one of the following
                       to be set: spec.hostname, spec.hostnameSource, spec.esHostname or spec.esHostnameSource
@@ -5737,36 +5739,6 @@ spec:
                     name:
                       minLength: 1
                       type: string
-                    podDisruptionBudget:
-                      description: PodDisruptionBudget defines the PDB configuration
-                        for this node pool
-                      properties:
-                        maxUnavailable:
-                          anyOf:
-                          - type: integer
-                          - type: string
-                          description: |-
-                            MaxUnavailable represents the maximum number of pods that can be unavailable for this Humio node pool
-                            If not set, the operator will not use a MaxUnavailable value for the node pool's PodDisruptionBudget.
-                            Can be a percentage or a fixed number.
-                          x-kubernetes-int-or-string: true
-                        minAvailable:
-                          anyOf:
-                          - type: integer
-                          - type: string
-                          description: |-
-                            MinAvailable represents the minimum number of pods that should be available for this Humio node pool.
-                            If not set, the operator will not create a PodDisruptionBudget for the node pool.
-                            Can be a percentage or a fixed number.
-                          x-kubernetes-int-or-string: true
-                        unhealthyPodEvictionPolicy:
-                          description: UnhealthyPodEvictionPolicy defines the policy
-                            for evicting unhealthy pods
-                          enum:
-                          - AlwaysAllow
-                          - IfHealthyBudget
-                          type: string
-                      type: object
                     spec:
                       properties:
                         affinity:
@@ -9208,6 +9180,7 @@ spec:
                               type: object
                           type: object
                         disableInitContainer:
+                          default: false
                           description: |-
                             DisableInitContainer is used to disable the init container completely which collects the availability zone from the Kubernetes worker node.
                             This is not recommended, unless you are using auto rebalancing partitions and are running in a single availability zone.
@@ -11271,6 +11244,41 @@ spec:
                           description: PodAnnotations can be used to specify annotations
                             that will be added to the Humio pods
                           type: object
+                        podDisruptionBudget:
+                          description: PodDisruptionBudget defines the PDB configuration
+                            for this node spec
+                          properties:
+                            enabled:
+                              description: Enabled indicates whether PodDisruptionBudget
+                                is enabled for this NodePool.
+                              type: boolean
+                            maxUnavailable:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: MaxUnavailable is the maximum number of
+                                pods that can be unavailable during a disruption.
+                              format: int-or-string
+                              type: string
+                              x-kubernetes-int-or-string: true
+                            minAvailable:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: MinAvailable is the minimum number of pods
+                                that must be available during a disruption.
+                              format: int-or-string
+                              type: string
+                              x-kubernetes-int-or-string: true
+                            unhealthyPodEvictionPolicy:
+                              description: |-
+                                UnhealthyPodEvictionPolicy defines the policy for evicting unhealthy pods.
+                                Requires Kubernetes 1.26+.
+                              enum:
+                              - IfHealthyBudget
+                              - AlwaysAllow
+                              type: string
+                          type: object
                         podLabels:
                           additionalProperties:
                             type: string
@@ -11454,6 +11462,7 @@ spec:
                               type: object
                           type: object
                         priorityClassName:
+                          default: ""
                           description: PriorityClassName is the name of the priority
                             class that will be used by the Humio pods
                           type: string
@@ -13125,10 +13134,10 @@ spec:
                               anyOf:
                               - type: integer
                               - type: string
+                              default: 1
                               description: |-
                                 MaxUnavailable is the maximum number of pods that can be unavailable during a rolling update.
                                 This can be configured to an absolute number or a percentage, e.g. "maxUnavailable: 5" or "maxUnavailable: 25%".
-                                By default, the max unavailable pods is 1.
                               x-kubernetes-int-or-string: true
                             minReadySeconds:
                               description: MinReadySeconds is the minimum time in
@@ -13183,6 +13192,41 @@ spec:
                   type: string
                 description: PodAnnotations can be used to specify annotations that
                   will be added to the Humio pods
+                type: object
+              podDisruptionBudget:
+                description: PodDisruptionBudget defines the PDB configuration for
+                  this node spec
+                properties:
+                  enabled:
+                    description: Enabled indicates whether PodDisruptionBudget is
+                      enabled for this NodePool.
+                    type: boolean
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MaxUnavailable is the maximum number of pods that
+                      can be unavailable during a disruption.
+                    format: int-or-string
+                    type: string
+                    x-kubernetes-int-or-string: true
+                  minAvailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MinAvailable is the minimum number of pods that must
+                      be available during a disruption.
+                    format: int-or-string
+                    type: string
+                    x-kubernetes-int-or-string: true
+                  unhealthyPodEvictionPolicy:
+                    description: |-
+                      UnhealthyPodEvictionPolicy defines the policy for evicting unhealthy pods.
+                      Requires Kubernetes 1.26+.
+                    enum:
+                    - IfHealthyBudget
+                    - AlwaysAllow
+                    type: string
                 type: object
               podLabels:
                 additionalProperties:
@@ -13366,6 +13410,7 @@ spec:
                     type: object
                 type: object
               priorityClassName:
+                default: ""
                 description: PriorityClassName is the name of the priority class that
                   will be used by the Humio pods
                 type: string
@@ -15046,10 +15091,10 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
+                    default: 1
                     description: |-
                       MaxUnavailable is the maximum number of pods that can be unavailable during a rolling update.
                       This can be configured to an absolute number or a percentage, e.g. "maxUnavailable: 5" or "maxUnavailable: 25%".
-                      By default, the max unavailable pods is 1.
                     x-kubernetes-int-or-string: true
                   minReadySeconds:
                     description: MinReadySeconds is the minimum time in seconds that

@@ -312,6 +312,10 @@ func (hnp *HumioNodePool) GetEnvironmentVariablesSource() []corev1.EnvFromSource
 	return hnp.humioNodeSpec.EnvironmentVariablesSource
 }
 
+func (hnp *HumioNodePool) GetPodDisruptionBudgetName() string {
+	return fmt.Sprintf("%s-pdb", hnp.GetNodePoolName())
+}
+
 func (hnp *HumioNodePool) GetTargetReplicationFactor() int {
 	if hnp.targetReplicationFactor != 0 {
 		return hnp.targetReplicationFactor
