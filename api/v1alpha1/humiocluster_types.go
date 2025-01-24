@@ -327,7 +327,7 @@ type HumioPodDisruptionBudgetSpec struct {
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 
 	// +kubebuilder:validation:Enum=IfHealthyBudget;AlwaysAllow
-	// +kubebuilder:default="IfHealthyBudget"
+	// +kubebuilder:validation:default="IfHealthyBudget"
 	// UnhealthyPodEvictionPolicy defines the policy for evicting unhealthy pods.
 	// Requires Kubernetes 1.26+.
 	// +optional
@@ -335,6 +335,10 @@ type HumioPodDisruptionBudgetSpec struct {
 
 	// +kubebuilder:validation:Xor={"minAvailable","maxUnavailable"}
 	// +kubebuilder:validation:Required
+
+	// Enabled indicates whether PodDisruptionBudget is enabled for this NodePool.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // HumioHostnameSource is the possible references to a hostname value that is stored outside of the HumioCluster resource
