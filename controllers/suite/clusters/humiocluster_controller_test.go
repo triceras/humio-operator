@@ -6045,7 +6045,7 @@ var _ = Describe("HumioCluster Controller", func() {
 		})
 	})
 
-	Context("Node Pool Pod Disruption Budgets", func() {
+	Context("Node Pool PodDisruptionBudgets", func() {
 		It("Should enforce PDB rules at node pool level", func() {
 			key := types.NamespacedName{
 				Name:      "humiocluster-nodepool-pdb",
