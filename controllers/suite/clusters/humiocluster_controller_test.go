@@ -6305,18 +6305,28 @@ var _ = Describe("HumioCluster Controller", func() {
 			Namespace: testProcessNamespace,
 		}
 		toCreate := suite.ConstructBasicSingleNodeHumioCluster(key, true)
-		toCreate.Spec.NodeCount = 3
+		toCreate.Spec.NodeCount = 0 // Set HumioCluster level NodeCount to 0 as we are using NodePools
+
 		minAvailable := intstr.FromInt(2)
-		toCreate.Spec.PodDisruptionBudget = &humiov1alpha1.HumioPodDisruptionBudgetSpec{
-			MinAvailable: &minAvailable,
+		toCreate.Spec.NodePools = []humiov1alpha1.HumioNodePoolSpec{ // Define NodePools
+			{
+				Name: "core", // Name of the node pool
+				HumioNodeSpec: humiov1alpha1.HumioNodeSpec{
+					NodeCount: 3, // NodeCount for this specific node pool
+					PodDisruptionBudget: &humiov1alpha1.HumioPodDisruptionBudgetSpec{ // Define PDB within NodePoolSpec
+						Enabled:      true, // **Important: Enable PDB**
+						MinAvailable: &minAvailable,
+					},
+				},
+			},
 		}
 
-		suite.UsingClusterBy(key.Name, "Creating cluster with PDB")
+		suite.UsingClusterBy(key.Name, "Creating cluster with PDB in NodePool")
 		ctx := context.Background()
 		suite.CreateAndBootstrapCluster(ctx, k8sClient, testHumioClient, toCreate, true, humiov1alpha1.HumioClusterStateRunning, testTimeout)
 		defer suite.CleanupCluster(ctx, k8sClient, toCreate)
 
-		pdbName := fmt.Sprintf("%s-pdb", toCreate.Name)
+		pdbName := fmt.Sprintf("%s-core-pdb", toCreate.Name) // PDB name should now include node pool name
 		pdb := &policyv1.PodDisruptionBudget{}
 
 		Eventually(func() error {
@@ -6355,7 +6365,8 @@ var _ = Describe("HumioCluster Controller", func() {
 			if err != nil {
 				return err
 			}
-			updatedHumioCluster.Spec.NodeCount = 1
+			// Scale down the node pool's NodeCount, not HumioCluster.Spec.NodeCount
+			updatedHumioCluster.Spec.NodePools[0].NodeCount = 1
 			return k8sClient.Update(ctx, &updatedHumioCluster)
 		}, testTimeout, suite.TestInterval).Should(Succeed())
 	})
