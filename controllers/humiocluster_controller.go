@@ -68,15 +68,6 @@ const (
 
 	// waitingOnPodsMessage is the message that is populated as the message in the cluster status when waiting on pods
 	waitingOnPodsMessage = "waiting for pods to become ready"
-
-	//Or make this configurable via a CR field or environment variable
-	defaultMinAvailable = "1"
-
-	// PDBNameSuffix is the suffix appended to PodDisruptionBudget names
-	pdbNameSuffix = "-pdb"
-
-	// Maximum length of a name in k8s
-	maxPDBNameLength = 253
 )
 
 //+kubebuilder:rbac:groups=core.humio.com,resources=humioclusters,verbs=get;list;watch;create;update;patch;delete
@@ -200,6 +191,7 @@ func (r *HumioClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		r.ensureValidCAIssuer,
 		r.ensureHumioClusterCACertBundle,
 		r.ensureHumioClusterKeystoreSecret,
+		r.ensureViewGroupPermissionsConfigMap,
 		r.ensureRolePermissionsConfigMap,
 		r.ensureNoIngressesIfIngressNotEnabled, // TODO: cleanupUnusedResources seems like a better place for this
 		r.ensureIngress,
@@ -216,7 +208,6 @@ func (r *HumioClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			r.ensureInitContainerPermissions,
 			r.ensureHumioNodeCertificates,
 			r.ensureExtraKafkaConfigsConfigMap,
-			r.ensureViewGroupPermissionsConfigMap,
 			r.reconcileSinglePDB,
 		} {
 			if err := fun(ctx, hc, pool); err != nil {
@@ -2270,12 +2261,6 @@ func (r *HumioClusterReconciler) cleanupUnusedResources(ctx context.Context, hc 
 			return r.updateStatus(ctx, r.Client.Status(), hc, statusOptions().
 				withMessage(err.Error()))
 		}
-
-		// Call cleanupOrphanedPDBs *once* after the loop, passing humioNodePools
-		if err := r.cleanupOrphanedPDBs(ctx, hc, &humioNodePools); err != nil {
-			return r.updateStatus(ctx, r.Client.Status(), hc, statusOptions().
-				withMessage(err.Error()))
-		}
 	}
 
 	for _, nodePool := range humioNodePools.Filter(NodePoolFilterDoesNotHaveNodes) {
@@ -2295,6 +2280,12 @@ func (r *HumioClusterReconciler) cleanupUnusedResources(ctx context.Context, hc 
 				withMessage(err.Error()))
 		}
 	}
+
+	if err := r.cleanupOrphanedPDBs(ctx, hc, &humioNodePools); err != nil {
+		return r.updateStatus(ctx, r.Client.Status(), hc, statusOptions().
+			withMessage(err.Error()))
+	}
+
 	return reconcile.Result{}, nil
 }
 
@@ -2371,19 +2362,6 @@ func getHumioNodePoolManagers(hc *humiov1alpha1.HumioCluster) HumioNodePoolList 
 	return humioNodePools
 }
 
-// shouldCreatePDBForNodePool determines if we should create a PDB for the node pool
-func shouldCreatePDBForNodePool(spec *humiov1alpha1.HumioNodeSpec) bool {
-	if spec == nil {
-		return false
-	}
-	pdb := spec.PodDisruptionBudget
-	if pdb == nil {
-		return false
-	}
-	// Only create PDB if node pool has nodes and either MinAvailable or MaxUnavailable is set
-	return spec.NodeCount > 0 && (pdb.MinAvailable != nil || pdb.MaxUnavailable != nil)
-}
-
 // reconcileSinglePDB handles creation/update of a PDB for a single node pool
 func (r *HumioClusterReconciler) reconcileSinglePDB(ctx context.Context, hc *humiov1alpha1.HumioCluster, hnp *HumioNodePool) error {
 	pdbSpec := hnp.GetPodDisruptionBudget()
@@ -2411,20 +2389,27 @@ func (r *HumioClusterReconciler) reconcileSinglePDB(ctx context.Context, hc *hum
 	return r.createOrUpdatePDB(ctx, hc, hnp, desiredPDB) // Modified to take HumioNodePool
 }
 
+const (
+	HumioProtectionFinalizer = "humio.com/pdb-protection"
+)
+
 func (r *HumioClusterReconciler) constructPDB(hc *humiov1alpha1.HumioCluster, hnp *HumioNodePool, pdbSpec *humiov1alpha1.HumioPodDisruptionBudgetSpec) (*policyv1.PodDisruptionBudget, error) {
 	pdbName := hnp.GetPodDisruptionBudgetName() // Use GetPodDisruptionBudgetName from HumioNodePool
+	// Create and populate labels map
+	labels := kubernetes.LabelsForHumio(hc.Name)
+	labels["humio.com/node-pool"] = hnp.GetNodePoolName()
+
 	selector := &metav1.LabelSelector{
 		MatchLabels: kubernetes.MatchingLabelsForHumio(hc.Name), // Assuming PDB should target all Humio pods
 	}
 
 	minAvailable := pdbSpec.MinAvailable
-	maxUnavailable := pdbSpec.MaxUnavailable
-
 	pdb := &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      pdbName,
-			Namespace: hc.Namespace,
-			Labels:    kubernetes.LabelsForHumio(hc.Name), // Add node pool name label if needed
+			Name:       pdbName,
+			Namespace:  hc.Namespace,
+			Labels:     kubernetes.LabelsForHumio(hc.Name), // Add node pool name label if needed
+			Finalizers: []string{HumioProtectionFinalizer},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(hc, humiov1alpha1.GroupVersion.WithKind("HumioCluster")),
 			},
@@ -2436,10 +2421,11 @@ func (r *HumioClusterReconciler) constructPDB(hc *humiov1alpha1.HumioCluster, hn
 
 	if minAvailable != nil {
 		pdb.Spec.MinAvailable = minAvailable
-	} else if maxUnavailable != nil {
-		pdb.Spec.MaxUnavailable = maxUnavailable
 	} else {
-		defaultMinAvailable := intstr.FromInt(1) // Or define a more sensible default
+		defaultMinAvailable := intstr.IntOrString{
+			Type:   intstr.Int,
+			IntVal: 1,
+		}
 		pdb.Spec.MinAvailable = &defaultMinAvailable
 	}
 
@@ -2481,38 +2467,62 @@ func SemanticPDBsEqual(desired *policyv1.PodDisruptionBudget, current *policyv1.
 	return true
 }
 
-// cleanupOrphanedPDBs removes PDBs that don't correspond to the current cluster and node pools
+// cleanupOrphanedPDBs removes PDBs that don't correspond to node pools
 func (r *HumioClusterReconciler) cleanupOrphanedPDBs(ctx context.Context, hc *humiov1alpha1.HumioCluster, humioNodePools *HumioNodePoolList) error {
-	r.Log.Info("cleaning up orphaned PDBs")
+	// Get all valid node pool names
+	validNodePools := make(map[string]struct{})
+	for _, hnp := range humioNodePools.Items {
+		validNodePools[hnp.GetNodePoolName()] = struct{}{}
+	}
 
-	// List existing PDBs in the namespace with matching labels
 	existingPDBs := &policyv1.PodDisruptionBudgetList{}
-	if err := r.List(ctx, existingPDBs,
-		client.InNamespace(hc.Namespace),
-		client.MatchingLabels(kubernetes.LabelsForHumio(hc.Name))); err != nil {
+	if err := r.List(ctx, existingPDBs, client.InNamespace(hc.Namespace)); err != nil {
 		return fmt.Errorf("failed to list PDBs: %w", err)
 	}
 
-	// Create a map of valid PDB names based on current HumioNodePools
-	validPDBs := make(map[string]bool)
-	for _, hnp := range humioNodePools.Items {
-		if hnp.GetPodDisruptionBudget() != nil { // Check if PDB is enabled for the node pool
-			pdbName := hnp.GetPodDisruptionBudgetName()
-			validPDBs[pdbName] = true
-		}
-	}
-
-	// Delete any PDBs that aren't in the valid PDBs map
 	for _, pdb := range existingPDBs.Items {
-		if _, isValid := validPDBs[pdb.Name]; !isValid {
-			r.Log.Info("deleting orphaned PDB",
-				"pdbName", pdb.Name,
-				"clusterName", hc.Name)
+		nodePoolName := pdb.Labels["humio.com/node-pool"]
+		if nodePoolName == "" {
+			continue
+		}
+
+		if isOwnedByCluster(&pdb, hc) && !isValidNodePool(nodePoolName, validNodePools) {
+			r.Log.Info("Deleting orphaned PDB", "name", pdb.Name, "nodePool", nodePoolName)
 			if err := r.Delete(ctx, &pdb); err != nil && !k8serrors.IsNotFound(err) {
-				return fmt.Errorf("failed to delete orphaned PDB %s: %w", pdb.Name, err)
+				return fmt.Errorf("failed to delete PDB %s: %w", pdb.Name, err)
 			}
 		}
 	}
+	return nil
+}
 
+func isValidNodePool(name string, validPools map[string]struct{}) bool {
+	_, exists := validPools[name]
+	return exists
+}
+
+func isOwnedByCluster(pdb *policyv1.PodDisruptionBudget, hc *humiov1alpha1.HumioCluster) bool {
+	for _, ownerRef := range pdb.OwnerReferences {
+		if ownerRef.UID == hc.UID && ownerRef.Kind == "HumioCluster" {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *HumioClusterReconciler) handlePDBFinalizers(ctx context.Context, hc *humiov1alpha1.HumioCluster) error {
+	pdbs := &policyv1.PodDisruptionBudgetList{}
+	if err := r.List(ctx, pdbs, client.MatchingLabels(kubernetes.MatchingLabelsForHumio(hc.Name))); err != nil {
+		return err
+	}
+
+	for _, pdb := range pdbs.Items {
+		if controllerutil.ContainsFinalizer(&pdb, HumioProtectionFinalizer) {
+			controllerutil.RemoveFinalizer(&pdb, HumioProtectionFinalizer)
+			if err := r.Update(ctx, &pdb); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
