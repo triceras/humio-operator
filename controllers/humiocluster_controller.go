@@ -1928,34 +1928,6 @@ func (r *HumioClusterReconciler) ensureMismatchedPodsAreDeleted(ctx context.Cont
 
 	podsForDeletion := desiredLifecycleState.podsToBeReplaced
 
-	pdbSpec := hnp.GetPodDisruptionBudget(hc) // Pass the HumioCluster instance
-	r.Log.Info("Entering PDB enforcement check", "nodePool", hnp.GetNodePoolName(), "pdbSpec", pdbSpec, "pdbSpec.Enabled", pdbSpec != nil && pdbSpec.Enabled)
-	if pdbSpec != nil && pdbSpec.Enabled { // Check if PDB is enabled for this NodePool
-		pdb := &policyv1.PodDisruptionBudget{}
-		pdbName := fmt.Sprintf("%s-%s-pdb", hc.Name, hnp.GetNodePoolName()) // Generate PDB name using cluster name and nodepool name
-		r.Log.Info("Fetching PDB", "pdbName", pdbName, "namespace", hnp.GetNamespace())
-		err := r.Get(ctx, types.NamespacedName{Name: pdbName, Namespace: hnp.GetNamespace()}, pdb) // Use NodePool namespace
-		if err != nil {
-			r.Log.Error(err, "Error fetching PDB", "pdbName", pdbName, "namespace", hnp.GetNamespace())
-			if !k8serrors.IsNotFound(err) {
-				return reconcile.Result{}, fmt.Errorf("failed to get PDB for node pool %s: %w", hnp.GetNodePoolName(), err)
-			}
-			r.Log.Info("PDB not found for node pool, proceeding without PDB check", "pdb", pdbName, "namespace", hnp.GetNamespace(), "nodePool", hnp.GetNodePoolName())
-		} else {
-			disruptionsAllowed := pdb.Status.DisruptionsAllowed
-			podsToDeleteCount := len(podsForDeletion)
-			r.Log.Info("PDB Status", "pdbName", pdbName, "disruptionsAllowed", disruptionsAllowed, "podsToDeleteCount", podsToDeleteCount)
-
-			if int32(podsToDeleteCount) > disruptionsAllowed {
-				r.Log.Info("PDB BLOCKING deletion", "pdbName", pdbName, "disruptionsAllowed", disruptionsAllowed, "podsToDeleteCount", podsToDeleteCount)
-				return reconcile.Result{RequeueAfter: time.Minute}, fmt.Errorf("scale down blocked by PDB for node pool %s, disruptions not allowed", hnp.GetNodePoolName())
-			}
-			r.Log.Info("PDB ALLOWING deletion", "pdbName", pdbName, "disruptionsAllowed", disruptionsAllowed, "podsToDeleteCount", podsToDeleteCount)
-		}
-	} else {
-		r.Log.Info("PDB enforcement NOT ENABLED or no PDB spec", "nodePool", hnp.GetNodePoolName(), "pdbSpec", pdbSpec)
-	}
-
 	// if zone awareness is enabled, we pin a zone until we're done replacing all pods in that zone,
 	// this is repeated for each zone with pods that needs replacing
 	if *hnp.GetUpdateStrategy().EnableZoneAwareness && !helpers.UseEnvtest() {
@@ -2284,6 +2256,13 @@ func (r *HumioClusterReconciler) verifyHumioClusterConfigurationIsValid(ctx cont
 }
 
 func (r *HumioClusterReconciler) cleanupUnusedResources(ctx context.Context, hc *humiov1alpha1.HumioCluster, humioNodePools HumioNodePoolList) (reconcile.Result, error) {
+	if !hc.DeletionTimestamp.IsZero() {
+		if err := r.handlePDBFinalizers(ctx, hc); err != nil {
+			return r.updateStatus(ctx, r.Client.Status(), hc, statusOptions().
+				withMessage(fmt.Sprintf("failed to handle PDB finalizers: %s", err)))
+		}
+	}
+
 	for _, pool := range humioNodePools.Items {
 		if err := r.ensureOrphanedPvcsAreDeleted(ctx, hc, pool); err != nil {
 			return r.updateStatus(ctx, r.Client.Status(), hc, statusOptions().
@@ -2307,11 +2286,6 @@ func (r *HumioClusterReconciler) cleanupUnusedResources(ctx context.Context, hc 
 			return r.updateStatus(ctx, r.Client.Status(), hc, statusOptions().
 				withMessage(err.Error()))
 		}
-	}
-
-	if err := r.cleanupOrphanedPDBs(ctx, hc, &humioNodePools); err != nil {
-		return r.updateStatus(ctx, r.Client.Status(), hc, statusOptions().
-			withMessage(err.Error()))
 	}
 
 	return reconcile.Result{}, nil
@@ -2392,7 +2366,7 @@ func getHumioNodePoolManagers(hc *humiov1alpha1.HumioCluster) HumioNodePoolList 
 
 // reconcileSinglePDB handles creation/update of a PDB for a single node pool
 func (r *HumioClusterReconciler) reconcileSinglePDB(ctx context.Context, hc *humiov1alpha1.HumioCluster, hnp *HumioNodePool) error {
-	pdbSpec := hnp.GetPodDisruptionBudget(hc)
+	pdbSpec := hnp.GetPodDisruptionBudget()
 	if pdbSpec == nil {
 		r.Log.Info("skipping PDB creation - node pool does not have PDB configured",
 			"nodePool", hnp.GetNodePoolName()) // Use NodePool Name here
@@ -2411,7 +2385,7 @@ func (r *HumioClusterReconciler) reconcileSinglePDB(ctx context.Context, hc *hum
 
 	desiredPDB, err := r.constructPDB(hc, hnp, pdbSpec)
 	if err != nil {
-		r.Log.Error(err, "failed to construct PDB", "pdbName", hnp.GetPodDisruptionBudgetName(), "namespace", hnp.GetNamespace())
+		r.Log.Error(err, "failed to construct PDB", "pdbName", hnp.GetPodDisruptionBudgetName())
 		return fmt.Errorf("failed to construct PDB: %w", err)
 	}
 
@@ -2438,15 +2412,17 @@ func (r *HumioClusterReconciler) constructPDB(hc *humiov1alpha1.HumioCluster, hn
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       pdbName,
 			Namespace:  hc.Namespace,
-			Labels:     kubernetes.LabelsForHumio(hc.Name), // Add node pool name label if needed
+			Labels:     kubernetes.LabelsForHumio(hc.Name),
 			Finalizers: []string{HumioProtectionFinalizer},
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(hc, humiov1alpha1.GroupVersion.WithKind("HumioCluster")),
-			},
 		},
 		Spec: policyv1.PodDisruptionBudgetSpec{
 			Selector: selector,
 		},
+	}
+
+	// Set controller reference using controller-runtime utility
+	if err := controllerutil.SetControllerReference(hc, pdb, r.Scheme()); err != nil {
+		return nil, fmt.Errorf("failed to set controller reference: %w", err)
 	}
 
 	if minAvailable != nil {
