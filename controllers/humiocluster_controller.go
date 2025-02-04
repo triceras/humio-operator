@@ -2444,15 +2444,15 @@ func (r *HumioClusterReconciler) constructPDB(hc *humiov1alpha1.HumioCluster, hn
 	labels["humio.com/node-pool"] = hnp.GetNodePoolName()
 
 	selector := &metav1.LabelSelector{
-		MatchLabels: kubernetes.MatchingLabelsForHumio(hc.Name), // Assuming PDB should target all Humio pods
+		MatchLabels: kubernetes.MatchingLabelsForHumioNodePool(hc.Name, hnp.GetNodePoolName()),
 	}
 
 	minAvailable := pdbSpec.MinAvailable
 	pdb := &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       pdbName,
-			Namespace:  hc.Namespace,
-			Labels:     kubernetes.LabelsForHumio(hc.Name),
+			Name:      pdbName,
+			Namespace: hc.Namespace,
+			Labels:    hnp.GetNodePoolLabels(),
 		},
 		Spec: policyv1.PodDisruptionBudgetSpec{
 			Selector: selector,
