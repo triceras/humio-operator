@@ -2479,46 +2479,23 @@ func (r *HumioClusterReconciler) constructPDB(hc *humiov1alpha1.HumioCluster, hn
 
 // createOrUpdatePDB creates or updates a PodDisruptionBudget object
 func (r *HumioClusterReconciler) createOrUpdatePDB(ctx context.Context, hc *humiov1alpha1.HumioCluster, hnp *HumioNodePool, desiredPDB *policyv1.PodDisruptionBudget) error {
-	currentPDB := &policyv1.PodDisruptionBudget{}
-	pdbName := hnp.GetPodDisruptionBudgetName()
-	err := r.Get(ctx, client.ObjectKey{Name: pdbName, Namespace: hc.Namespace}, currentPDB)
-	if err != nil && k8serrors.IsNotFound(err) {
-		r.Log.Info("creating PDB", "pdb", pdbName)
-		err = r.Create(ctx, desiredPDB)
-		if err != nil {
-			r.Log.Error(err, "failed to create PDB", "pdbName", desiredPDB.Name, "pdbNamespace", desiredPDB.Namespace)
-			return fmt.Errorf("failed to create PDB %s/%s: %w", desiredPDB.Namespace, desiredPDB.Name, err)
-		}
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("failed to get PDB: %w", err)
+	// Set owner reference so that the PDB is deleted when hc is deleted.
+	if err := controllerutil.SetControllerReference(hc, desiredPDB, r.Scheme()); err != nil {
+			return fmt.Errorf("failed to set owner reference on PDB %s/%s: %w", desiredPDB.Namespace, desiredPDB.Name, err)
 	}
 
-	if !SemanticPDBsEqual(desiredPDB, currentPDB) {
-		r.Log.Info("updating PDB", "pdb", pdbName)
-		updatedPDB := currentPDB.DeepCopy()
-		updatedPDB.Spec = desiredPDB.Spec
-		err = r.Update(ctx, updatedPDB)
-		if err != nil {
-			r.Log.Error(err, "failed to update PDB", "pdbName", desiredPDB.Name, "pdbNamespace", desiredPDB.Namespace)
-			return fmt.Errorf("could not update PDB %s/%s: %w", desiredPDB.Namespace, desiredPDB.Name, err) // Return Result{}, error on failure
-		}
+	// Use CreateOrUpdate to simplify the logic.
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, desiredPDB, func() error {
+			// In this callback, update the fields of desiredPDB to match the desired state.
+			// This example assumes that desiredPDB.Spec is already properly set.
+			// You might add additional logic here if you need to merge fields.
+			return nil
+	})
+	if err != nil {
+			r.Log.Error(err, "failed to create or update PDB", "pdb", desiredPDB.Name)
+			return fmt.Errorf("failed to create or update PDB %s/%s: %w", desiredPDB.Namespace, desiredPDB.Name, err)
 	}
-
-	r.Log.V(1).Info("pdb is up-to-date", "pdb", pdbName)
+	r.Log.Info("PDB operation completed", "operation", op, "pdb", desiredPDB.Name)
 	return nil
 }
 
-// SemanticPDBsEqual compares two PodDisruptionBudgets and returns true if they are equal
-func SemanticPDBsEqual(desired *policyv1.PodDisruptionBudget, current *policyv1.PodDisruptionBudget) bool {
-	if !equality.Semantic.DeepEqual(desired.Spec.MinAvailable, current.Spec.MinAvailable) {
-		return false
-	}
-	if !equality.Semantic.DeepEqual(desired.Spec.MaxUnavailable, current.Spec.MaxUnavailable) {
-		return false
-	}
-	if !equality.Semantic.DeepEqual(desired.Spec.Selector, current.Spec.Selector) {
-		return false
-	}
-	return true
-}
