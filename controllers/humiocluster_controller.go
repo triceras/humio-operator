@@ -453,31 +453,48 @@ func (r *HumioClusterReconciler) validateNodeCount(hc *humiov1alpha1.HumioCluste
 func (r *HumioClusterReconciler) ensureExtraKafkaConfigsConfigMap(ctx context.Context, hc *humiov1alpha1.HumioCluster, hnp *HumioNodePool) error {
 	extraKafkaConfigsConfigMapData := hnp.GetExtraKafkaConfigs()
 	if extraKafkaConfigsConfigMapData == "" {
+		extraKafkaConfigsConfigMap, err := kubernetes.GetConfigMap(ctx, r, hnp.GetExtraKafkaConfigsConfigMapName(), hc.Namespace)
+		if err == nil {
+			// TODO: refactor and move deletion to cleanupUnusedResources
+			if err = r.Delete(ctx, &extraKafkaConfigsConfigMap); err != nil {
+				r.Log.Error(err, "unable to delete extra kafka configs configmap")
+			}
+		}
 		return nil
 	}
-	_, err := kubernetes.GetConfigMap(ctx, r, hnp.GetExtraKafkaConfigsConfigMapName(), hnp.GetNamespace())
+
+	desiredConfigMap := kubernetes.ConstructExtraKafkaConfigsConfigMap(
+		hnp.GetExtraKafkaConfigsConfigMapName(),
+		ExtraKafkaPropertiesFilename,
+		extraKafkaConfigsConfigMapData,
+		hnp.GetClusterName(),
+		hnp.GetNamespace(),
+	)
+	if err := controllerutil.SetControllerReference(hc, &desiredConfigMap, r.Scheme()); err != nil {
+		return r.logErrorAndReturn(err, "could not set controller reference")
+	}
+
+	existingConfigMap, err := kubernetes.GetConfigMap(ctx, r, hnp.GetExtraKafkaConfigsConfigMapName(), hnp.GetNamespace())
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			configMap := kubernetes.ConstructExtraKafkaConfigsConfigMap(
-				hnp.GetExtraKafkaConfigsConfigMapName(),
-				ExtraKafkaPropertiesFilename,
-				extraKafkaConfigsConfigMapData,
-				hnp.GetClusterName(),
-				hnp.GetNamespace(),
-			)
-			if err := controllerutil.SetControllerReference(hc, configMap, r.Scheme()); err != nil {
-				return r.logErrorAndReturn(err, "could not set controller reference")
-			}
-			r.Log.Info(fmt.Sprintf("creating configMap: %s", configMap.Name))
-			if err = r.Create(ctx, configMap); err != nil {
+			r.Log.Info(fmt.Sprintf("creating configMap: %s", desiredConfigMap.Name))
+			if err = r.Create(ctx, &desiredConfigMap); err != nil {
 				return r.logErrorAndReturn(err, "unable to create extra kafka configs configmap")
 			}
-			r.Log.Info(fmt.Sprintf("successfully created extra kafka configs configmap name %s", configMap.Name))
+			r.Log.Info(fmt.Sprintf("successfully created extra kafka configs configmap name %s", desiredConfigMap.Name))
 			humioClusterPrometheusMetrics.Counters.ConfigMapsCreated.Inc()
 			return nil
 		}
-		return r.logErrorAndReturn(err, "unable to get extra kakfa configs configmap")
+		return r.logErrorAndReturn(err, "unable to fetch extra kafka configs configmap")
 	}
+
+	if !equality.Semantic.DeepEqual(existingConfigMap.Data, desiredConfigMap.Data) {
+		existingConfigMap.Data = desiredConfigMap.Data
+		if updateErr := r.Update(ctx, &existingConfigMap); updateErr != nil {
+			return fmt.Errorf("unable to update extra kafka configs configmap: %w", updateErr)
+		}
+	}
+
 	return nil
 }
 
@@ -543,34 +560,46 @@ func (r *HumioClusterReconciler) ensureViewGroupPermissionsConfigMap(ctx context
 	if viewGroupPermissionsConfigMapData == "" {
 		viewGroupPermissionsConfigMap, err := kubernetes.GetConfigMap(ctx, r, ViewGroupPermissionsConfigMapName(hc), hc.Namespace)
 		if err == nil {
-			if err = r.Delete(ctx, viewGroupPermissionsConfigMap); err != nil {
-				r.Log.Error(err, "unable to delete view group permissions config map")
+			// TODO: refactor and move deletion to cleanupUnusedResources
+			if err = r.Delete(ctx, &viewGroupPermissionsConfigMap); err != nil {
+				r.Log.Error(err, "unable to delete view group permissions configmap")
 			}
 		}
 		return nil
 	}
-	_, err := kubernetes.GetConfigMap(ctx, r, ViewGroupPermissionsConfigMapName(hc), hc.Namespace)
+
+	desiredConfigMap := kubernetes.ConstructViewGroupPermissionsConfigMap(
+		ViewGroupPermissionsConfigMapName(hc),
+		ViewGroupPermissionsFilename,
+		viewGroupPermissionsConfigMapData,
+		hc.Name,
+		hc.Namespace,
+	)
+	if err := controllerutil.SetControllerReference(hc, &desiredConfigMap, r.Scheme()); err != nil {
+		return r.logErrorAndReturn(err, "could not set controller reference")
+	}
+
+	existingConfigMap, err := kubernetes.GetConfigMap(ctx, r, ViewGroupPermissionsConfigMapName(hc), hc.Namespace)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			configMap := kubernetes.ConstructViewGroupPermissionsConfigMap(
-				ViewGroupPermissionsConfigMapName(hc),
-				ViewGroupPermissionsFilename,
-				viewGroupPermissionsConfigMapData,
-				hc.Name,
-				hc.Namespace,
-			)
-			if err := controllerutil.SetControllerReference(hc, configMap, r.Scheme()); err != nil {
-				return r.logErrorAndReturn(err, "could not set controller reference")
-			}
-
-			r.Log.Info(fmt.Sprintf("creating configMap: %s", configMap.Name))
-			if err = r.Create(ctx, configMap); err != nil {
+			r.Log.Info(fmt.Sprintf("creating configMap: %s", desiredConfigMap.Name))
+			if err = r.Create(ctx, &desiredConfigMap); err != nil {
 				return r.logErrorAndReturn(err, "unable to create view group permissions configmap")
 			}
-			r.Log.Info(fmt.Sprintf("successfully created view group permissions configmap name %s", configMap.Name))
+			r.Log.Info(fmt.Sprintf("successfully created view group permissions configmap name %s", desiredConfigMap.Name))
 			humioClusterPrometheusMetrics.Counters.ConfigMapsCreated.Inc()
+			return nil
+		}
+		return fmt.Errorf("unable to fetch view group permissions configmap: %w", err)
+	}
+
+	if !equality.Semantic.DeepEqual(existingConfigMap.Data, desiredConfigMap.Data) {
+		existingConfigMap.Data = desiredConfigMap.Data
+		if updateErr := r.Update(ctx, &existingConfigMap); updateErr != nil {
+			return fmt.Errorf("unable to update view group permissions configmap: %w", updateErr)
 		}
 	}
+
 	return nil
 }
 
@@ -581,34 +610,46 @@ func (r *HumioClusterReconciler) ensureRolePermissionsConfigMap(ctx context.Cont
 	if rolePermissionsConfigMapData == "" {
 		rolePermissionsConfigMap, err := kubernetes.GetConfigMap(ctx, r, RolePermissionsConfigMapName(hc), hc.Namespace)
 		if err == nil {
-			if err = r.Delete(ctx, rolePermissionsConfigMap); err != nil {
-				r.Log.Error(err, "unable to delete role permissions config map")
+			// TODO: refactor and move deletion to cleanupUnusedResources
+			if err = r.Delete(ctx, &rolePermissionsConfigMap); err != nil {
+				return fmt.Errorf("unable to delete role permissions configmap")
 			}
 		}
 		return nil
 	}
-	_, err := kubernetes.GetConfigMap(ctx, r, RolePermissionsConfigMapName(hc), hc.Namespace)
+
+	desiredConfigMap := kubernetes.ConstructRolePermissionsConfigMap(
+		RolePermissionsConfigMapName(hc),
+		RolePermissionsFilename,
+		rolePermissionsConfigMapData,
+		hc.Name,
+		hc.Namespace,
+	)
+	if err := controllerutil.SetControllerReference(hc, &desiredConfigMap, r.Scheme()); err != nil {
+		return r.logErrorAndReturn(err, "could not set controller reference")
+	}
+
+	existingConfigMap, err := kubernetes.GetConfigMap(ctx, r, RolePermissionsConfigMapName(hc), hc.Namespace)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			configMap := kubernetes.ConstructRolePermissionsConfigMap(
-				RolePermissionsConfigMapName(hc),
-				RolePermissionsFilename,
-				rolePermissionsConfigMapData,
-				hc.Name,
-				hc.Namespace,
-			)
-			if err := controllerutil.SetControllerReference(hc, configMap, r.Scheme()); err != nil {
-				return r.logErrorAndReturn(err, "could not set controller reference")
+			r.Log.Info(fmt.Sprintf("creating configMap: %s", desiredConfigMap.Name))
+			if createErr := r.Create(ctx, &desiredConfigMap); createErr != nil {
+				return r.logErrorAndReturn(createErr, "unable to create role permissions configmap")
 			}
-
-			r.Log.Info(fmt.Sprintf("creating configMap: %s", configMap.Name))
-			if err = r.Create(ctx, configMap); err != nil {
-				return r.logErrorAndReturn(err, "unable to create role permissions configmap")
-			}
-			r.Log.Info(fmt.Sprintf("successfully created role permissions configmap name %s", configMap.Name))
+			r.Log.Info(fmt.Sprintf("successfully created role permissions configmap name %s", desiredConfigMap.Name))
 			humioClusterPrometheusMetrics.Counters.ConfigMapsCreated.Inc()
+			return nil
+		}
+		return fmt.Errorf("unable to fetch role permissions configmap: %w", err)
+	}
+
+	if !equality.Semantic.DeepEqual(existingConfigMap.Data, desiredConfigMap.Data) {
+		existingConfigMap.Data = desiredConfigMap.Data
+		if updateErr := r.Update(ctx, &existingConfigMap); updateErr != nil {
+			return fmt.Errorf("unable to update role permissions configmap: %w", updateErr)
 		}
 	}
+
 	return nil
 }
 
@@ -2256,13 +2297,6 @@ func (r *HumioClusterReconciler) verifyHumioClusterConfigurationIsValid(ctx cont
 }
 
 func (r *HumioClusterReconciler) cleanupUnusedResources(ctx context.Context, hc *humiov1alpha1.HumioCluster, humioNodePools HumioNodePoolList) (reconcile.Result, error) {
-	if !hc.DeletionTimestamp.IsZero() {
-		if err := r.handlePDBFinalizers(ctx, hc); err != nil {
-			return r.updateStatus(ctx, r.Client.Status(), hc, statusOptions().
-				withMessage(fmt.Sprintf("failed to handle PDB finalizers: %s", err)))
-		}
-	}
-
 	for _, pool := range humioNodePools.Items {
 		if err := r.ensureOrphanedPvcsAreDeleted(ctx, hc, pool); err != nil {
 			return r.updateStatus(ctx, r.Client.Status(), hc, statusOptions().
@@ -2367,34 +2401,40 @@ func getHumioNodePoolManagers(hc *humiov1alpha1.HumioCluster) HumioNodePoolList 
 // reconcileSinglePDB handles creation/update of a PDB for a single node pool
 func (r *HumioClusterReconciler) reconcileSinglePDB(ctx context.Context, hc *humiov1alpha1.HumioCluster, hnp *HumioNodePool) error {
 	pdbSpec := hnp.GetPodDisruptionBudget()
+	pdbName := hnp.GetPodDisruptionBudgetName()
 	if pdbSpec == nil {
-		r.Log.Info("skipping PDB creation - node pool does not have PDB configured",
-			"nodePool", hnp.GetNodePoolName()) // Use NodePool Name here
-		return nil
+			r.Log.Info("PDB not configured by user, deleting any existing PDB", "nodePool", hnp.GetNodePoolName(), "pdb", pdbName)
+			currentPDB := &policyv1.PodDisruptionBudget{}
+			err := r.Get(ctx, client.ObjectKey{Name: pdbName, Namespace: hc.Namespace}, currentPDB)
+			if err == nil {
+					if delErr := r.Delete(ctx, currentPDB); delErr != nil {
+							return fmt.Errorf("failed to delete orphaned PDB %s/%s: %w", hc.Namespace, pdbName, delErr)
+					}
+					r.Log.Info("deleted orphaned PDB", "pdb", pdbName)
+			} else if !k8serrors.IsNotFound(err) {
+					return fmt.Errorf("failed to get PDB %s/%s: %w", hc.Namespace, pdbName, err)
+			}
+			return nil
 	}
 
 	pods, err := kubernetes.ListPods(ctx, r, hc.Namespace, kubernetes.MatchingLabelsForHumio(hc.Name))
 	if err != nil {
-		return fmt.Errorf("failed to list pods: %w", err)
+			return fmt.Errorf("failed to list pods: %w", err)
 	}
 
 	if len(pods) == 0 {
-		r.Log.Info("no pods found, skipping PDB creation")
-		return nil
+			r.Log.Info("no pods found, skipping PDB creation")
+			return nil
 	}
 
 	desiredPDB, err := r.constructPDB(hc, hnp, pdbSpec)
 	if err != nil {
-		r.Log.Error(err, "failed to construct PDB", "pdbName", hnp.GetPodDisruptionBudgetName())
-		return fmt.Errorf("failed to construct PDB: %w", err)
+			r.Log.Error(err, "failed to construct PDB", "pdbName", pdbName)
+			return fmt.Errorf("failed to construct PDB: %w", err)
 	}
 
 	return r.createOrUpdatePDB(ctx, hc, hnp, desiredPDB)
 }
-
-const (
-	HumioProtectionFinalizer = "humio.com/pdb-protection"
-)
 
 // constructPDB creates a PodDisruptionBudget object for a given HumioCluster and HumioNodePool
 func (r *HumioClusterReconciler) constructPDB(hc *humiov1alpha1.HumioCluster, hnp *HumioNodePool, pdbSpec *humiov1alpha1.HumioPodDisruptionBudgetSpec) (*policyv1.PodDisruptionBudget, error) {
@@ -2413,7 +2453,6 @@ func (r *HumioClusterReconciler) constructPDB(hc *humiov1alpha1.HumioCluster, hn
 			Name:       pdbName,
 			Namespace:  hc.Namespace,
 			Labels:     kubernetes.LabelsForHumio(hc.Name),
-			Finalizers: []string{HumioProtectionFinalizer},
 		},
 		Spec: policyv1.PodDisruptionBudgetSpec{
 			Selector: selector,
@@ -2482,67 +2521,4 @@ func SemanticPDBsEqual(desired *policyv1.PodDisruptionBudget, current *policyv1.
 		return false
 	}
 	return true
-}
-
-// cleanupOrphanedPDBs deletes PodDisruptionBudgets that are orphaned
-func (r *HumioClusterReconciler) cleanupOrphanedPDBs(ctx context.Context, hc *humiov1alpha1.HumioCluster, humioNodePools *HumioNodePoolList) error {
-	// Get all valid node pool names
-	validNodePools := make(map[string]struct{})
-	for _, hnp := range humioNodePools.Items {
-		validNodePools[hnp.GetNodePoolName()] = struct{}{}
-	}
-
-	existingPDBs := &policyv1.PodDisruptionBudgetList{}
-	if err := r.List(ctx, existingPDBs, client.InNamespace(hc.Namespace)); err != nil {
-		return fmt.Errorf("failed to list PDBs: %w", err)
-	}
-
-	for _, pdb := range existingPDBs.Items {
-		nodePoolName := pdb.Labels["humio.com/node-pool"]
-		if nodePoolName == "" {
-			continue
-		}
-
-		if isOwnedByCluster(&pdb, hc) && !isValidNodePool(nodePoolName, validNodePools) {
-			r.Log.Info("Deleting orphaned PDB", "name", pdb.Name, "nodePool", nodePoolName)
-			if err := r.Delete(ctx, &pdb); err != nil && !k8serrors.IsNotFound(err) {
-				return fmt.Errorf("failed to delete PDB %s: %w", pdb.Name, err)
-			}
-		}
-	}
-	return nil
-}
-
-// isValidNodePool checks if a node pool name is valid
-func isValidNodePool(name string, validPools map[string]struct{}) bool {
-	_, exists := validPools[name]
-	return exists
-}
-
-// isOwnedByCluster checks if a PodDisruptionBudget is owned by a HumioCluster
-func isOwnedByCluster(pdb *policyv1.PodDisruptionBudget, hc *humiov1alpha1.HumioCluster) bool {
-	for _, ownerRef := range pdb.OwnerReferences {
-		if ownerRef.UID == hc.UID && ownerRef.Kind == "HumioCluster" {
-			return true
-		}
-	}
-	return false
-}
-
-// handlePDBFinalizers removes finalizers from PodDisruptionBudgets
-func (r *HumioClusterReconciler) handlePDBFinalizers(ctx context.Context, hc *humiov1alpha1.HumioCluster) error {
-	pdbs := &policyv1.PodDisruptionBudgetList{}
-	if err := r.List(ctx, pdbs, client.MatchingLabels(kubernetes.MatchingLabelsForHumio(hc.Name))); err != nil {
-		return err
-	}
-
-	for _, pdb := range pdbs.Items {
-		if controllerutil.ContainsFinalizer(&pdb, HumioProtectionFinalizer) {
-			controllerutil.RemoveFinalizer(&pdb, HumioProtectionFinalizer)
-			if err := r.Update(ctx, &pdb); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
