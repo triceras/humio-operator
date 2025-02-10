@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	humioapi "github.com/humio/humio-operator/internal/api"
 	"github.com/humio/humio-operator/internal/api/humiographql"
@@ -27,6 +28,7 @@ import (
 	"github.com/humio/humio-operator/internal/kubernetes"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -3822,6 +3824,128 @@ var _ = Describe("Humio Resources Controllers", func() {
 			Expect(k8sClient.Create(ctx, toCreateInvalidScheduledSearch)).Should(Not(Succeed()))
 		})
 
+	})
+	Context("HumioPdfRenderService", Label("envtest", "dummy", "real"), func() {
+		const (
+			pdfName = "example-pdf-render"
+		)
+		var (
+			ctx       = context.Background()
+			namespace = clusterKey.Namespace
+		)
+
+		It("should create Deployment and Service when a new HumioPdfRenderService is created", func() {
+			// Create a new HumioPdfRenderService CR
+			pdfRenderSvc := &humiov1alpha1.HumioPdfRenderService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pdfName,
+					Namespace: namespace,
+				},
+				Spec: humiov1alpha1.HumioPdfRenderServiceSpec{
+					Image:              "registry.example.com/pdf-render-service:latest",
+					Replicas:           2,
+					Port:               8080,
+					Resources:          corev1.ResourceRequirements{}, // Add proper resource definitions if needed
+					Env:                []corev1.EnvVar{{Name: "ENV_VAR", Value: "value"}},
+					Annotations:        map[string]string{"test-annotation": "true"},
+					ServiceType:        corev1.ServiceTypeClusterIP,
+					ServiceAccountName: "default",
+					// LivenessProbe, ReadinessProbe, and Affinity may be nil for this test
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, pdfRenderSvc)).Should(Succeed())
+
+			// Verify that the Deployment is created with the expected configuration.
+			var dep appsv1.Deployment
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name:      pdfRenderSvc.Name + "-pdf-render-service",
+					Namespace: namespace,
+				}, &dep)
+			}, testTimeout, suite.TestInterval).Should(Succeed())
+
+			Expect(*dep.Spec.Replicas).To(Equal(pdfRenderSvc.Spec.Replicas))
+			Expect(dep.Spec.Template.Spec.Containers).ToNot(BeEmpty())
+			container := dep.Spec.Template.Spec.Containers[0]
+			Expect(container.Image).To(Equal(pdfRenderSvc.Spec.Image))
+			Expect(container.Ports).To(HaveLen(1))
+			Expect(container.Ports[0].ContainerPort).To(Equal(pdfRenderSvc.Spec.Port))
+			Expect(dep.Spec.Template.ObjectMeta.Annotations).To(HaveKeyWithValue("test-annotation", "true"))
+
+			// Verify that the Service is created with the proper configuration.
+			var svc corev1.Service
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name:      pdfRenderSvc.Name + "-pdf-render-service",
+					Namespace: namespace,
+				}, &svc)
+			}, testTimeout, suite.TestInterval).Should(Succeed())
+			Expect(svc.Spec.Type).To(Equal(pdfRenderSvc.Spec.ServiceType))
+			Expect(svc.Spec.Ports).ToNot(BeEmpty())
+			Expect(svc.Spec.Ports[0].Port).To(Equal(pdfRenderSvc.Spec.Port))
+		})
+
+		It("should update the Deployment when the HumioPdfRenderService is updated", func() {
+			// Create a new HumioPdfRenderService resource with initial configuration.
+			pdfRenderSvc := &humiov1alpha1.HumioPdfRenderService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pdfName + "-update",
+					Namespace: namespace,
+				},
+				Spec: humiov1alpha1.HumioPdfRenderServiceSpec{
+					Image:              "registry.example.com/pdf-render-service:latest",
+					Replicas:           1,
+					Port:               8080,
+					Resources:          corev1.ResourceRequirements{},
+					Env:                []corev1.EnvVar{{Name: "ENV_VAR", Value: "value"}},
+					Annotations:        map[string]string{"test-annotation": "initial"},
+					ServiceType:        corev1.ServiceTypeClusterIP,
+					ServiceAccountName: "default",
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, pdfRenderSvc)).Should(Succeed())
+
+			// Wait for the corresponding Deployment to exist using the expected naming convention.
+			var dep appsv1.Deployment
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name:      pdfRenderSvc.Name + "-pdf-render-service",
+					Namespace: namespace,
+				}, &dep)
+			}, testTimeout, suite.TestInterval).Should(Succeed())
+
+			Expect(*dep.Spec.Replicas).To(Equal(pdfRenderSvc.Spec.Replicas))
+			Expect(dep.Spec.Template.ObjectMeta.Annotations).To(HaveKeyWithValue("test-annotation", "initial"))
+
+			// Update the HumioPdfRenderService spec.
+			pdfRenderSvc.Spec.Replicas = 3
+			pdfRenderSvc.Spec.Image = "registry.example.com/pdf-render-service:updated"
+			pdfRenderSvc.Spec.Annotations["test-annotation"] = "updated"
+			Expect(k8sClient.Update(ctx, pdfRenderSvc)).Should(Succeed())
+
+			// Verify that the Deployment eventually reflects the updated spec.
+			Eventually(func() int32 {
+				var updatedDep appsv1.Deployment
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      pdfRenderSvc.Name + "-pdf-render-service",
+					Namespace: namespace,
+				}, &updatedDep)
+				if err != nil {
+					return -1
+				}
+				return *updatedDep.Spec.Replicas
+			}, 30*time.Second, suite.TestInterval).Should(Equal(pdfRenderSvc.Spec.Replicas))
+
+			var updatedDep appsv1.Deployment
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      pdfRenderSvc.Name + "-pdf-render-service",
+				Namespace: namespace,
+			}, &updatedDep)).Should(Succeed())
+			Expect(updatedDep.Spec.Template.Spec.Containers[0].Image).To(Equal(pdfRenderSvc.Spec.Image))
+			Expect(updatedDep.Spec.Template.ObjectMeta.Annotations).To(HaveKeyWithValue("test-annotation", "updated"))
+		})
 	})
 })
 
