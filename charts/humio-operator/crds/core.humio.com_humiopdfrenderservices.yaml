@@ -1238,6 +1238,11 @@ spec:
                     format: int32
                     type: integer
                 type: object
+              nodePort:
+                description: NodePort is the port the service listens on when the
+                  service type is NodePort.
+                format: int32
+                type: integer
               port:
                 description: Port is the port the service listens on.
                 format: int32

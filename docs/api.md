@@ -35730,6 +35730,15 @@ HumioPdfRenderServiceSpec defines the desired state of HumioPdfRenderService
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b>nodePort</b></td>
+        <td>integer</td>
+        <td>
+          NodePort is the port the service listens on when the service type is NodePort.<br/>
+          <br/>
+            <i>Format</i>: int32<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b>port</b></td>
         <td>integer</td>
         <td>

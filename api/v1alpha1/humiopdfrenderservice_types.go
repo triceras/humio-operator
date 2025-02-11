@@ -88,6 +88,10 @@ type HumioPdfRenderServiceSpec struct {
 	// +kubebuilder:default=ClusterIP
 	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
 
+	// NodePort is the port the service listens on when the service type is NodePort.
+	// +optional
+	NodePort int32 `json:"nodePort,omitempty"`
+
 	// ServiceAccountName is the name of the Kubernetes Service Account to use.
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`

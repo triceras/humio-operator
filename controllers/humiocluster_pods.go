@@ -367,8 +367,12 @@ func ConstructPod(hnp *HumioNodePool, humioNodeName string, attachments *podAtta
 			if existingVolumeMount.Name == volumeMount.Name {
 				return &corev1.Pod{}, fmt.Errorf("extraHumioVolumeMount conflicts with existing name: %s", existingVolumeMount.Name)
 			}
+			// Check for mount path conflicts, specifically with HumioDataPath
+			if volumeMount.MountPath == HumioDataPath {
+				return &corev1.Pod{}, fmt.Errorf("extraHumioVolumeMount conflicts with existing mount path: %s", HumioDataPath)
+			}
 			if strings.HasPrefix(existingVolumeMount.MountPath, volumeMount.MountPath) {
-				return &corev1.Pod{}, fmt.Errorf("extraHumioVolumeMount conflicts with existing mount path: %s", existingVolumeMount.MountPath)
+				return &corev1.Pod{}, fmt.Errorf("extraHumioVolumeMount path is a prefix of existing mount path: %s", existingVolumeMount.MountPath)
 			}
 		}
 		pod.Spec.Containers[humioIdx].VolumeMounts = append(pod.Spec.Containers[humioIdx].VolumeMounts, volumeMount)
