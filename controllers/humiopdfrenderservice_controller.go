@@ -49,6 +49,12 @@ func (r *HumioPdfRenderServiceReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// If the CR is disabled, skip reconciliation.
+	if humioPdfRenderService.Spec.Enabled != nil && !*humioPdfRenderService.Spec.Enabled {
+		logger.Info("HumioPdfRenderService is disabled, skipping reconciliation", "Name", humioPdfRenderService.Name)
+		return ctrl.Result{}, nil
+	}
+
 	// If the CR's namespace is empty, default it.
 	if humioPdfRenderService.Namespace == "" {
 		ns := r.Namespace
@@ -86,7 +92,12 @@ func (r *HumioPdfRenderServiceReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// TODO: Reconcile Ingress and update CR status as needed.
+	// Add ingress reconciliation
+	if err := r.reconcileIngress(ctx, &humioPdfRenderService); err != nil {
+		logger.Error(err, "Failed to reconcile Ingress")
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -363,5 +374,6 @@ func (r *HumioPdfRenderServiceReconciler) SetupWithManager(mgr ctrl.Manager) err
 		For(&corev1alpha1.HumioPdfRenderService{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&netv1.Ingress{}).
 		Complete(r)
 }
